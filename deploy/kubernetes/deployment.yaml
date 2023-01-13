@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: airplay
+  name: airplay
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airplay
+  template:
+    metadata:
+      labels:
+        app: airplay
+    spec:
+      containers:
+        - env:
+            - name: AIR_DISCORDTOKEN
+              value: ${AIR_DISCORDTOKEN}
+          image: trojan295/airplay
+          imagePullPolicy: Always
+          name: airplay
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+
+      restartPolicy: Always
