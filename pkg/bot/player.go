@@ -13,8 +13,9 @@ import (
 )
 
 type Trigger struct {
-	VoiceChannelID string
-	TextChannelID  string
+	Command        string
+	VoiceChannelID *string
+	TextChannelID  *string
 }
 
 type SongMetadata struct {
@@ -29,31 +30,56 @@ type Song interface {
 	GetDCAData(ctx context.Context) ([]byte, error)
 }
 
+type ASRService interface {
+	FeedOpusData(opusData []byte) error
+}
+
 type GuildPlayer struct {
 	sess    *discordgo.Session
 	guildID string
 
 	triggerCh chan Trigger
 
-	mutex          sync.Mutex
-	voiceChannelID string
-	textChannelID  string
-	playlist       []Song
+	isListening     bool
+	listeningCancel context.CancelFunc
+
+	asrService ASRService
+
+	mutex           sync.Mutex
+	voiceChannelID  string
+	textChannelID   string
+	voiceConnection *discordgo.VoiceConnection
+	playlist        []Song
+	playedSong      Song
 
 	songCtxCancel context.CancelFunc
 }
 
 func NewGuildPlayer(sess *discordgo.Session, guildID string) *GuildPlayer {
 	return &GuildPlayer{
-		sess:      sess,
-		guildID:   guildID,
-		triggerCh: make(chan Trigger),
-		playlist:  []Song{},
-		mutex:     sync.Mutex{},
+		sess:       sess,
+		guildID:    guildID,
+		triggerCh:  make(chan Trigger),
+		playlist:   []Song{},
+		playedSong: nil,
+		mutex:      sync.Mutex{},
 	}
 }
 
-func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID string, s Song) {
+func (p *GuildPlayer) ASRService(asrService ASRService) *GuildPlayer {
+	p.asrService = asrService
+	return p
+}
+
+func (p *GuildPlayer) SendMessage(message string) {
+	if p.textChannelID != "" {
+		p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
+			Content: message,
+		})
+	}
+}
+
+func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
 	p.mutex.Lock()
 	p.playlist = append(p.playlist, s)
 	p.mutex.Unlock()
@@ -66,7 +92,11 @@ func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID string, s Song) {
 	}(s)
 
 	go func() {
-		p.triggerCh <- Trigger{VoiceChannelID: voiceChannelID, TextChannelID: textChannelID}
+		p.triggerCh <- Trigger{
+			Command:        "play",
+			VoiceChannelID: voiceChannelID,
+			TextChannelID:  textChannelID,
+		}
 	}()
 }
 
@@ -116,41 +146,135 @@ func (p *GuildPlayer) GetPlaylist() []string {
 	return playlist
 }
 
+func (p *GuildPlayer) GetPlayedSong() Song {
+	return p.playedSong
+}
+
+func (p *GuildPlayer) JoinVoiceChannel(channelID, textChannelID string) {
+	p.triggerCh <- Trigger{
+		Command:        "join",
+		VoiceChannelID: &channelID,
+		TextChannelID:  &textChannelID,
+	}
+}
+
+func (p *GuildPlayer) LeaveVoiceChannel() {
+	p.triggerCh <- Trigger{
+		Command: "leave",
+	}
+}
+
 func (p *GuildPlayer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case trigger := <-p.triggerCh:
-			p.voiceChannelID = trigger.VoiceChannelID
-			p.textChannelID = trigger.TextChannelID
-		}
+			switch trigger.Command {
+			case "play":
+				if trigger.TextChannelID != nil {
+					p.textChannelID = *trigger.TextChannelID
+				}
+				if trigger.VoiceChannelID != nil {
+					p.voiceChannelID = *trigger.VoiceChannelID
+				}
 
-		p.mutex.Lock()
-		playlistLen := len(p.playlist)
-		p.mutex.Unlock()
+				p.mutex.Lock()
+				playlistLen := len(p.playlist)
+				p.mutex.Unlock()
 
-		if playlistLen == 0 {
-			continue
-		}
+				if playlistLen == 0 {
+					continue
+				}
 
-		if err := p.playPlaylist(ctx); err != nil {
-			log.Printf("failed to play playlist: %v", err)
+				if err := p.playPlaylist(ctx); err != nil {
+					log.Printf("failed to play playlist: %v", err)
+				}
+			case "join":
+				p.voiceChannelID = *trigger.VoiceChannelID
+				p.textChannelID = *trigger.TextChannelID
+
+				if err := p.joinChannel(ctx); err != nil {
+					log.Printf("failed to join channel: %v", err)
+				}
+
+				go func(ctx context.Context) {
+					ctx, cancel := context.WithCancel(ctx)
+					p.listeningCancel = cancel
+					p.listenVoiceCommands(ctx)
+				}(ctx)
+			case "leave":
+				if err := p.leaveChannel(ctx); err != nil {
+					log.Printf("failed to join channel: %v", err)
+				}
+			}
 		}
 	}
 }
 
-func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
-	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
+func (p *GuildPlayer) listenVoiceCommands(ctx context.Context) {
+	p.isListening = true
+
+	for {
+		select {
+		case <-ctx.Done():
+			p.isListening = false
+			return
+		case pckt := <-p.voiceConnection.OpusRecv:
+			if p.asrService == nil {
+				continue
+			}
+
+			if err := p.asrService.FeedOpusData(pckt.Opus); err != nil {
+				log.Printf("failed to feed data to ASR: %v", err)
+			}
+		case <-time.After(300 * time.Millisecond):
+			if p.asrService == nil {
+				continue
+			}
+
+			if err := p.asrService.FeedOpusData(make([]byte, 640)); err != nil {
+				log.Printf("failed to feed silence data to ASR: %v", err)
+			}
+		}
+	}
+}
+
+func (p *GuildPlayer) joinChannel(ctx context.Context) error {
+	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, true, false)
 	if err != nil {
 		return fmt.Errorf("while joining voice channel: %w", err)
 	}
 
-	defer func() {
-		if err := vc.Disconnect(); err != nil {
-			log.Printf("failed to disconnect from voice channel: %v", err)
+	p.voiceConnection = vc
+
+	return nil
+}
+
+func (p *GuildPlayer) leaveChannel(ctx context.Context) error {
+	p.listeningCancel()
+
+	if err := p.voiceConnection.Disconnect(); err != nil {
+		log.Printf("failed to disconnect from voice channel: %v", err)
+	}
+	return nil
+}
+
+func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
+	if !p.isListening {
+		vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
+		if err != nil {
+			return fmt.Errorf("while joining voice channel: %w", err)
 		}
-	}()
+
+		p.voiceConnection = vc
+
+		defer func() {
+			if err := vc.Disconnect(); err != nil {
+				log.Printf("failed to disconnect from voice channel: %v", err)
+			}
+		}()
+	}
 
 	for {
 		p.mutex.Lock()
@@ -194,20 +318,24 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			log.Printf("failed to send playing song message: %v", err)
 		}
 
-		if err := vc.Speaking(true); err != nil {
+		if err := p.voiceConnection.Speaking(true); err != nil {
 			return fmt.Errorf("while starting to speak: %w", err)
 		}
 
+		p.playedSong = song
+
 		for _, buff := range opus {
 			select {
-			case vc.OpusSend <- buff:
+			case p.voiceConnection.OpusSend <- buff:
 				continue
 			case <-songCtx.Done():
 				break
 			}
 		}
 
-		if err := vc.Speaking(false); err != nil {
+		p.playedSong = nil
+
+		if err := p.voiceConnection.Speaking(false); err != nil {
 			return fmt.Errorf("while sstopping to speak: %w", err)
 		}
 

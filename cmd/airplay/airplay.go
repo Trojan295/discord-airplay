@@ -6,26 +6,23 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
 	"github.com/Trojan295/discord-airplay/cmd/airplay/commands"
+	"github.com/Trojan295/discord-airplay/pkg/asr"
 	"github.com/Trojan295/discord-airplay/pkg/bot"
+	"github.com/Trojan295/discord-airplay/pkg/config"
 	"github.com/Trojan295/discord-airplay/pkg/sources"
 	"github.com/bwmarrin/discordgo"
 	"github.com/kelseyhightower/envconfig"
 )
 
-type Config struct {
-	DiscordToken  string `required:"true"`
-	GuildID       string
-	CommandPrefix string `default:"air"`
-}
-
 type GuildID string
 
 var (
-	cfg *Config = &Config{}
+	cfg = &config.Config{}
 
 	streamer     *sources.YoutubeFetcher
 	guildPlayers map[GuildID]*bot.GuildPlayer
@@ -36,6 +33,14 @@ func main() {
 		log.Fatalf("failed to load envconfig: %v", err)
 	}
 
+	if cfg.Whisper.Enabled {
+		if cfg.Whisper.Threads == 0 {
+			cfg.Whisper.Threads = runtime.NumCPU()
+		}
+
+		log.Printf("ASR: Whisper processing using %d threads, %s sampling strategy", cfg.Whisper.Threads, cfg.Whisper.SamplingStrategy)
+	}
+
 	streamer = sources.NewYoutubeFetcher()
 	guildPlayers = make(map[GuildID]*bot.GuildPlayer)
 
@@ -44,7 +49,10 @@ func main() {
 		SkipHandler(skipSong).
 		StopHandler(stopPlaying).
 		ListHandler(listPlaylist).
-		RemoveHandler(removeSong)
+		RemoveHandler(removeSong).
+		PlayingNowHandler(getPlayingSong).
+		JoinHandler(joinChannel).
+		LeaveHandler(leaveChannel)
 
 	slashCommands := commandHandler.GetSlashCommands()
 
@@ -74,13 +82,13 @@ func main() {
 	}
 	defer dg.Close()
 
-	registeredCommands := make([]*discordgo.ApplicationCommand, len(slashCommands))
-	for i, v := range slashCommands {
+	registeredCommands := make([]*discordgo.ApplicationCommand, 0, len(slashCommands))
+	for _, v := range slashCommands {
 		cmd, err := dg.ApplicationCommandCreate(dg.State.User.ID, cfg.GuildID, v)
 		if err != nil {
 			log.Panicf("Cannot create '%v' command: %v", v.Name, err)
 		}
-		registeredCommands[i] = cmd
+		registeredCommands = append(registeredCommands, cmd)
 	}
 
 	defer func() {
@@ -109,10 +117,23 @@ func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
 		return
 	}
 
+	player := setupGuildPlayer(event.Guild.ID)
+	guildPlayers[GuildID(event.Guild.ID)] = player
+
+	log.Printf("connected to guild ID %s", event.Guild.ID)
+
+	go func() {
+		if err := player.Run(context.TODO()); err != nil {
+			log.Printf("error occured, when player was running: %v", err)
+		}
+	}()
+}
+
+func setupGuildPlayer(guildID string) *bot.GuildPlayer {
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
 		fmt.Println("Error creating Discord session: ", err)
-		return
+		return nil
 	}
 
 	err = dg.Open()
@@ -120,14 +141,76 @@ func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
 		fmt.Println("Error opening Discord session: ", err)
 	}
 
-	player := bot.NewGuildPlayer(dg, event.Guild.ID)
-	guildPlayers[GuildID(event.Guild.ID)] = player
+	player := bot.NewGuildPlayer(dg, guildID)
 
-	go func() {
-		if err := player.Run(context.TODO()); err != nil {
-			log.Printf("error occured, when player was running: %v", err)
+	if cfg.Whisper.Enabled {
+		recognizer, err := asr.NewWhisper(asr.WhisperConfig{
+			Modelpath:        cfg.Whisper.ModelPath,
+			Threads:          cfg.Whisper.Threads,
+			SamplingStrategy: asr.WHISPER_BEAM_SAMPLING,
+			ASRCallback: func(text string) {
+				handleVoiceCommand(player, text)
+			},
+		})
+
+		if err != nil {
+			log.Printf("failed to create recognizer: %v", err)
+			return player
 		}
-	}()
+
+		player = player.ASRService(recognizer)
+	}
+
+	return player
+}
+
+func handleVoiceCommand(player *bot.GuildPlayer, text string) {
+	words := strings.Split(
+		strings.ToLower(
+			strings.ReplaceAll(
+				strings.ReplaceAll(text, ".", ""),
+				",", "")),
+		" ")
+
+	activationIndex := -1
+
+	for idx, word := range words {
+		if word == "eric" {
+			activationIndex = idx
+		}
+	}
+
+	log.Printf("detected speech: %v", text)
+
+	if activationIndex < 0 || len(words) <= activationIndex+1 {
+		return
+	}
+
+	command := words[activationIndex+1:]
+
+	if command[0] == "stop" {
+		player.Stop()
+	} else if command[0] == "skip" {
+		player.SkipSong()
+	} else if command[0] == "play" {
+		if len(command) == 1 {
+			return
+		}
+
+		song := sources.ParseYoutubeInput(strings.Join(command, " "), streamer)
+
+		go func(player *bot.GuildPlayer, song bot.Song) {
+			metadata, err := song.GetMetadata(context.Background())
+			if err != nil {
+				log.Printf("failed to get song metadata %s: %v", song.GetHumanName(), err)
+			}
+
+			player.SendMessage(fmt.Sprintf("⏯️ Added **%s** - %s to playlist", metadata.Title, metadata.URL))
+
+		}(player, song)
+
+		player.AddSong(nil, nil, song)
+	}
 }
 
 func playSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
@@ -163,7 +246,7 @@ func playSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discor
 				metadata, err := song.GetMetadata(context.Background())
 
 				if err != nil {
-					log.Printf("failed to add song %s: %v", song.GetHumanName(), err)
+					log.Printf("failed to get song metadata %s: %v", song.GetHumanName(), err)
 					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
 						Content: "😟 Failed to add song",
 					})
@@ -177,7 +260,7 @@ func playSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discor
 					return
 				}
 
-				player.AddSong(ic.ChannelID, vs.ChannelID, song)
+				player.AddSong(&ic.ChannelID, &vs.ChannelID, song)
 
 				commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
 					Content: fmt.Sprintf("⏯️ Added **%s** - %s to playlist", metadata.Title, metadata.URL),
@@ -264,4 +347,65 @@ func removeSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *disc
 	}
 
 	commands.InteractionRespondMessage(s, ic.Interaction, fmt.Sprintf("🗑️ Removed song **%v** from playlist", song.GetHumanName()))
+}
+
+func getPlayingSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
+	g, err := s.State.Guild(ic.GuildID)
+	if err != nil {
+		log.Printf("failed to get guild %s: %v", ic.GuildID, err)
+		commands.InteractionRespondError(s, ic.Interaction)
+		return
+	}
+	player := guildPlayers[GuildID(g.ID)]
+
+	song := player.GetPlayedSong()
+	if song == nil {
+		commands.InteractionRespondMessage(s, ic.Interaction, fmt.Sprintf("🔇 No song is being played right now..."))
+		return
+	}
+
+	commands.InteractionRespondMessage(s, ic.Interaction, fmt.Sprintf("🎶 %s", song.GetHumanName()))
+}
+
+func joinChannel(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
+	if !cfg.Whisper.Enabled {
+		commands.InteractionRespondCommandDisabled(s, ic.Interaction)
+		return
+	}
+
+	g, err := s.State.Guild(ic.GuildID)
+	if err != nil {
+		log.Printf("failed to get guild %s: %v", ic.GuildID, err)
+		commands.InteractionRespondError(s, ic.Interaction)
+		return
+	}
+	player := guildPlayers[GuildID(g.ID)]
+
+	for _, vs := range g.VoiceStates {
+		if vs.UserID == ic.Member.User.ID {
+			player.JoinVoiceChannel(vs.ChannelID, ic.ChannelID)
+			commands.InteractionRespondMessage(s, ic.Interaction, "Joined channel")
+			return
+		}
+	}
+
+	commands.InteractionRespondMessage(s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+}
+
+func leaveChannel(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
+	if !cfg.Whisper.Enabled {
+		commands.InteractionRespondCommandDisabled(s, ic.Interaction)
+		return
+	}
+
+	g, err := s.State.Guild(ic.GuildID)
+	if err != nil {
+		log.Printf("failed to get guild %s: %v", ic.GuildID, err)
+		commands.InteractionRespondError(s, ic.Interaction)
+		return
+	}
+	player := guildPlayers[GuildID(g.ID)]
+	player.LeaveVoiceChannel()
+
+	commands.InteractionRespondMessage(s, ic.Interaction, "Left channel")
 }

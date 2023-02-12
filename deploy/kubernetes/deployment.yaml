@@ -19,6 +19,10 @@ spec:
         - env:
             - name: AIR_DISCORDTOKEN
               value: ${AIR_DISCORDTOKEN}
+            - name: AIR_WHISPER_MODELPATH
+              value: /bin/model.bin
+            - name: AIR_WHISPER_THREADS
+              value: "4"
           image: trojan295/airplay
           imagePullPolicy: Always
           name: airplay
