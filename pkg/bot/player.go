@@ -38,13 +38,9 @@ type GuildPlayer struct {
 	sess    *discordgo.Session
 	guildID string
 
-	triggerCh chan Trigger
+	ctx context.Context
 
-	isListening     bool
-	listeningCancel context.CancelFunc
-
-	asrService ASRService
-
+	triggerCh       chan Trigger
 	mutex           sync.Mutex
 	voiceChannelID  string
 	textChannelID   string
@@ -55,8 +51,9 @@ type GuildPlayer struct {
 	songCtxCancel context.CancelFunc
 }
 
-func NewGuildPlayer(sess *discordgo.Session, guildID string) *GuildPlayer {
+func NewGuildPlayer(ctx context.Context, sess *discordgo.Session, guildID string) *GuildPlayer {
 	return &GuildPlayer{
+		ctx:        ctx,
 		sess:       sess,
 		guildID:    guildID,
 		triggerCh:  make(chan Trigger),
@@ -66,16 +63,13 @@ func NewGuildPlayer(sess *discordgo.Session, guildID string) *GuildPlayer {
 	}
 }
 
-func (p *GuildPlayer) ASRService(asrService ASRService) *GuildPlayer {
-	p.asrService = asrService
-	return p
-}
-
 func (p *GuildPlayer) SendMessage(message string) {
 	if p.textChannelID != "" {
-		p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
+		if _, err := p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
 			Content: message,
-		})
+		}); err != nil {
+			log.Printf("failed to send message to guild %s: %v", p.guildID, err.Error())
+		}
 	}
 }
 
@@ -86,7 +80,7 @@ func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
 
 	// prefetch the DCA data
 	go func(s Song) {
-		if _, err := s.GetDCAData(context.TODO()); err != nil {
+		if _, err := s.GetDCAData(p.ctx); err != nil {
 			log.Printf("failed to get DCA data for song %s: %v", s.GetHumanName(), err)
 		}
 	}(s)
@@ -190,51 +184,6 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 				if err := p.playPlaylist(ctx); err != nil {
 					log.Printf("failed to play playlist: %v", err)
 				}
-			case "join":
-				p.voiceChannelID = *trigger.VoiceChannelID
-				p.textChannelID = *trigger.TextChannelID
-
-				if err := p.joinChannel(ctx); err != nil {
-					log.Printf("failed to join channel: %v", err)
-				}
-
-				go func(ctx context.Context) {
-					ctx, cancel := context.WithCancel(ctx)
-					p.listeningCancel = cancel
-					p.listenVoiceCommands(ctx)
-				}(ctx)
-			case "leave":
-				if err := p.leaveChannel(ctx); err != nil {
-					log.Printf("failed to join channel: %v", err)
-				}
-			}
-		}
-	}
-}
-
-func (p *GuildPlayer) listenVoiceCommands(ctx context.Context) {
-	p.isListening = true
-
-	for {
-		select {
-		case <-ctx.Done():
-			p.isListening = false
-			return
-		case pckt := <-p.voiceConnection.OpusRecv:
-			if p.asrService == nil {
-				continue
-			}
-
-			if err := p.asrService.FeedOpusData(pckt.Opus); err != nil {
-				log.Printf("failed to feed data to ASR: %v", err)
-			}
-		case <-time.After(300 * time.Millisecond):
-			if p.asrService == nil {
-				continue
-			}
-
-			if err := p.asrService.FeedOpusData(make([]byte, 640)); err != nil {
-				log.Printf("failed to feed silence data to ASR: %v", err)
 			}
 		}
 	}
@@ -252,8 +201,6 @@ func (p *GuildPlayer) joinChannel(ctx context.Context) error {
 }
 
 func (p *GuildPlayer) leaveChannel(ctx context.Context) error {
-	p.listeningCancel()
-
 	if err := p.voiceConnection.Disconnect(); err != nil {
 		log.Printf("failed to disconnect from voice channel: %v", err)
 	}
@@ -261,20 +208,18 @@ func (p *GuildPlayer) leaveChannel(ctx context.Context) error {
 }
 
 func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
-	if !p.isListening {
-		vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
-		if err != nil {
-			return fmt.Errorf("while joining voice channel: %w", err)
-		}
-
-		p.voiceConnection = vc
-
-		defer func() {
-			if err := vc.Disconnect(); err != nil {
-				log.Printf("failed to disconnect from voice channel: %v", err)
-			}
-		}()
+	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
+	if err != nil {
+		return fmt.Errorf("while joining voice channel: %w", err)
 	}
+
+	p.voiceConnection = vc
+
+	defer func() {
+		if err := vc.Disconnect(); err != nil {
+			log.Printf("failed to disconnect from voice channel: %v", err)
+		}
+	}()
 
 	for {
 		p.mutex.Lock()

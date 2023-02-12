@@ -12,8 +12,6 @@ type CommandHandler struct {
 	listHandler       func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 	skipHandler       func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 	removeHandler     func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
-	joinHandler       func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
-	leaveHandler      func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 	playingNowHandler func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 }
 
@@ -48,16 +46,6 @@ func (ch *CommandHandler) RemoveHandler(h func(*discordgo.Session, *discordgo.In
 	return ch
 }
 
-func (ch *CommandHandler) JoinHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
-	ch.joinHandler = h
-	return ch
-}
-
-func (ch *CommandHandler) LeaveHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
-	ch.leaveHandler = h
-	return ch
-}
-
 func (ch *CommandHandler) PlayingNowHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
 	ch.playingNowHandler = h
 	return ch
@@ -82,10 +70,6 @@ func (ch *CommandHandler) GetHandlers() map[string]func(*discordgo.Session, *dis
 				ch.removeHandler(s, ic, option)
 			case "playing":
 				ch.playingNowHandler(s, ic, option)
-			case "join":
-				ch.joinHandler(s, ic, option)
-			case "leave":
-				ch.leaveHandler(s, ic, option)
 			}
 		},
 	}
@@ -142,16 +126,6 @@ func (ch *CommandHandler) GetSlashCommands() []*discordgo.ApplicationCommand {
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "playing",
 					Description: "Get currently playing song",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "join",
-					Description: "Make airplay join the voice channel where you are",
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionSubCommand,
-					Name:        "leave",
-					Description: "Make airplay to leave the voice channel",
 				},
 			},
 		},
