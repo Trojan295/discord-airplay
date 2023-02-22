@@ -1,9 +1,9 @@
 package bot
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"time"
@@ -26,8 +26,8 @@ type SongMetadata struct {
 
 type Song interface {
 	GetHumanName() string
-	GetMetadata(ctx context.Context) (*SongMetadata, error)
-	GetDCAData(ctx context.Context) ([]byte, error)
+	GetMetadata() *SongMetadata
+	GetDCAData(ctx context.Context) (io.Reader, error)
 }
 
 type ASRService interface {
@@ -77,13 +77,6 @@ func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
 	p.mutex.Lock()
 	p.playlist = append(p.playlist, s)
 	p.mutex.Unlock()
-
-	// prefetch the DCA data
-	go func(s Song) {
-		if _, err := s.GetDCAData(p.ctx); err != nil {
-			log.Printf("failed to get DCA data for song %s: %v", s.GetHumanName(), err)
-		}
-	}(s)
 
 	go func() {
 		p.triggerCh <- Trigger{
@@ -189,24 +182,6 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 	}
 }
 
-func (p *GuildPlayer) joinChannel(ctx context.Context) error {
-	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, true, false)
-	if err != nil {
-		return fmt.Errorf("while joining voice channel: %w", err)
-	}
-
-	p.voiceConnection = vc
-
-	return nil
-}
-
-func (p *GuildPlayer) leaveChannel(ctx context.Context) error {
-	if err := p.voiceConnection.Disconnect(); err != nil {
-		log.Printf("failed to disconnect from voice channel: %v", err)
-	}
-	return nil
-}
-
 func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
 	if err != nil {
@@ -244,19 +219,8 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while getting DCA data from song %v: %w", song, err)
 		}
 
-		opus, err := codec.ConvertDCAtoOpus(bytes.NewBuffer(dcaData))
-		if err != nil {
-			return fmt.Errorf("while converting DCA data to Opus: %w", err)
-		}
-
-		var message string
-
-		if metadata, err := song.GetMetadata(ctx); err != nil {
-			message = fmt.Sprintf("Playing song **%s**", song.GetHumanName())
-		} else {
-			message = fmt.Sprintf("Playing song **%s** - %s", metadata.Title, metadata.URL)
-		}
-
+		metadata := song.GetMetadata()
+		message := fmt.Sprintf("▶️ Playing song **%s** - %s", metadata.Title, metadata.URL)
 		if _, err := p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
 			Content: message,
 		}); err != nil {
@@ -269,13 +233,8 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 
 		p.playedSong = song
 
-		for _, buff := range opus {
-			select {
-			case p.voiceConnection.OpusSend <- buff:
-				continue
-			case <-songCtx.Done():
-				break
-			}
+		if err := codec.StreamDCAData(songCtx, dcaData, p.voiceConnection.OpusSend); err != nil {
+			return fmt.Errorf("while streaming DCA data: %w", err)
 		}
 
 		p.playedSong = nil

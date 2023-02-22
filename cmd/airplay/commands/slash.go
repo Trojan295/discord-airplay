@@ -13,6 +13,8 @@ type CommandHandler struct {
 	skipHandler       func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 	removeHandler     func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
 	playingNowHandler func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
+
+	addSongOrPlaylistHandler func(*discordgo.Session, *discordgo.InteractionCreate)
 }
 
 func NewCommandHandler(commandPrefix string) *CommandHandler {
@@ -51,7 +53,12 @@ func (ch *CommandHandler) PlayingNowHandler(h func(*discordgo.Session, *discordg
 	return ch
 }
 
-func (ch *CommandHandler) GetHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
+func (ch *CommandHandler) AddSongOrPlaylistHandler(h func(*discordgo.Session, *discordgo.InteractionCreate)) *CommandHandler {
+	ch.addSongOrPlaylistHandler = h
+	return ch
+}
+
+func (ch *CommandHandler) GetCommandHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
 	return map[string]func(*discordgo.Session, *discordgo.InteractionCreate){
 		ch.commandPrefix: func(s *discordgo.Session, ic *discordgo.InteractionCreate) {
 			options := ic.ApplicationCommandData().Options
@@ -72,6 +79,12 @@ func (ch *CommandHandler) GetHandlers() map[string]func(*discordgo.Session, *dis
 				ch.playingNowHandler(s, ic, option)
 			}
 		},
+	}
+}
+
+func (ch *CommandHandler) GetComponentHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
+	return map[string]func(*discordgo.Session, *discordgo.InteractionCreate){
+		"add_song_playlist": ch.addSongOrPlaylistHandler,
 	}
 }
 

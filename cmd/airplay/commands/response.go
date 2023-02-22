@@ -18,12 +18,16 @@ func InteractionRespondError(s *discordgo.Session, i *discordgo.Interaction) {
 }
 
 func InteractionRespondMessage(s *discordgo.Session, i *discordgo.Interaction, message string) {
-	if err := s.InteractionRespond(i, &discordgo.InteractionResponse{
+	InteractionRespond(s, i, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: message,
 		},
-	}); err != nil {
+	})
+}
+
+func InteractionRespond(s *discordgo.Session, i *discordgo.Interaction, response *discordgo.InteractionResponse) {
+	if err := s.InteractionRespond(i, response); err != nil {
 		log.Printf("failed to reponse to interaction: %v", err)
 	}
 }

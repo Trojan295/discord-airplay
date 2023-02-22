@@ -1,10 +1,11 @@
 package sources
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -19,9 +20,16 @@ func NewYoutubeFetcher() *YoutubeFetcher {
 	return &YoutubeFetcher{}
 }
 
-func (s *YoutubeFetcher) GetSongMetadata(ctx context.Context, song *YoutubeSong) (*bot.SongMetadata, error) {
-	ytArgs := s.getYTdlpGetMetadataArgs(song)
-	ytCmd := exec.CommandContext(ctx, "yt-dlp", ytArgs...)
+func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]bot.Song, error) {
+	args := []string{"--print", "title,original_url,is_live", "--flat-playlist"}
+
+	if strings.HasPrefix(input, "https://www.youtube.com") {
+		args = append(args, input)
+	} else {
+		args = append(args, fmt.Sprintf("ytsearch:%s", input))
+	}
+
+	ytCmd := exec.CommandContext(ctx, "yt-dlp", args...)
 
 	ytOutBuf := &bytes.Buffer{}
 	ytCmd.Stdout = ytOutBuf
@@ -31,117 +39,63 @@ func (s *YoutubeFetcher) GetSongMetadata(ctx context.Context, song *YoutubeSong)
 	}
 
 	ytOutLines := strings.Split(ytOutBuf.String(), "\n")
+	songCount := len(ytOutLines) / 3
 
-	return &bot.SongMetadata{
-		Title:    ytOutLines[0],
-		URL:      ytOutLines[1],
-		Playable: ytOutLines[2] == "False",
-	}, nil
+	songs := make([]bot.Song, 0, songCount)
+	for i := 0; i < songCount; i++ {
+		metadata := bot.SongMetadata{
+			Title:    ytOutLines[3*i],
+			URL:      ytOutLines[3*i+1],
+			Playable: ytOutLines[3*i+2] == "False" || ytOutLines[3*i+2] == "NA",
+		}
+		if !metadata.Playable {
+			continue
+		}
+
+		song := NewYoutubeSong(metadata, s)
+		songs = append(songs, song)
+	}
+
+	return songs, nil
 }
 
-func (s *YoutubeFetcher) GetDcaData(ctx context.Context, song *YoutubeSong) ([]byte, error) {
-	opusFile, err := os.CreateTemp("", "youtube-*.opus")
-	if err != nil {
-		return nil, fmt.Errorf("while creating temp file: %w", err)
-	}
-	defer opusFile.Close()
-	defer os.Remove(opusFile.Name())
+func (s *YoutubeFetcher) GetDcaData(ctx context.Context, song *YoutubeSong, writer io.Writer) error {
+	ytArgs := s.getYTdlpGetDataArgs(song)
+	ytCmd := strings.Join(append([]string{"yt-dlp"}, ytArgs...), " ")
 
-	ytArgs := s.getYTdlpGetDataArgs(opusFile.Name(), song)
-	ytCmd := exec.CommandContext(ctx, "yt-dlp", ytArgs...)
-
-	if err := ytCmd.Run(); err != nil {
-		return nil, fmt.Errorf("while executing yt-dlp command: %w", err)
-	}
-
-	dcaFile, err := os.CreateTemp("", "youtube-*.dca")
-	if err != nil {
-		return nil, fmt.Errorf("while creating temp file: %w", err)
-	}
-	defer dcaFile.Close()
-	defer os.Remove(dcaFile.Name())
-
-	buf := bytes.Buffer{}
-
-	dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("ffmpeg -i %s -f s16le -ar 48000 -ac 2 pipe:1 | dca", opusFile.Name()))
-	dcaCmd.Stdout = &buf
+	dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("%s | ffmpeg -i pipe: -f s16le -ar 48000 -ac 2 pipe:1 | dca", ytCmd))
+	dcaCmd.Stdout = writer
 
 	if err := dcaCmd.Run(); err != nil {
-		return nil, fmt.Errorf("while executing ffmpeg command: %w", err)
+		return fmt.Errorf("while executing get DCA data pipe: %w", err)
 	}
 
-	return buf.Bytes(), err
+	return nil
 }
 
-func (s *YoutubeFetcher) getYTdlpGetDataArgs(outputFilepath string, song *YoutubeSong) []string {
-	args := []string{"-x", "-o", outputFilepath, "--force-overwrites"}
-
-	if song.metadata.URL != "" {
-		args = append(args, song.metadata.URL)
-	} else {
-		args = append(args, fmt.Sprintf("ytsearch:%s", *song.searchTerm))
-	}
-
-	return args
-}
-
-func (s *YoutubeFetcher) getYTdlpGetMetadataArgs(song *YoutubeSong) []string {
-	args := []string{"--print", "title,original_url,is_live"}
-
-	if song.metadata.URL != "" {
-		args = append(args, song.metadata.URL)
-	} else {
-		args = append(args, fmt.Sprintf("ytsearch:%s", *song.searchTerm))
-	}
-
-	return args
-}
-
-func ParseYoutubeInput(input string, streamer *YoutubeFetcher) *YoutubeSong {
-	song := NewYoutubeSong(streamer)
-
-	if strings.HasPrefix(input, "https://www.youtube.com") {
-		return song.WithURL(input)
-	}
-
-	return song.WithSearchTerm(input)
+func (s *YoutubeFetcher) getYTdlpGetDataArgs(song *YoutubeSong) []string {
+	return []string{"-x", "-o", "-", "--force-overwrites", song.metadata.URL}
 }
 
 type YoutubeSong struct {
 	metadata bot.SongMetadata
+	fetcher  *YoutubeFetcher
 
-	searchTerm *string
-	data       []byte
-
-	streamer *YoutubeFetcher
-
-	dataMutex     sync.Mutex
-	metadataMutex sync.Mutex
-
-	metadataFetched bool
+	dcaData   *bytes.Buffer
+	dataMutex sync.Mutex
 }
 
-func NewYoutubeSong(streamer *YoutubeFetcher) *YoutubeSong {
+func NewYoutubeSong(metadata bot.SongMetadata, streamer *YoutubeFetcher) *YoutubeSong {
 	return &YoutubeSong{
-		streamer: streamer,
+		metadata: metadata,
+		fetcher:  streamer,
 
-		data: nil,
-
-		dataMutex:     sync.Mutex{},
-		metadataMutex: sync.Mutex{},
-
-		metadataFetched: false,
+		dcaData: nil,
 	}
 }
 
-func (s *YoutubeSong) WithURL(url string) *YoutubeSong {
-	s.metadata.URL = url
-	return s
-}
-
-func (s *YoutubeSong) WithSearchTerm(term string) *YoutubeSong {
-	s.searchTerm = &term
-	return s
+func (s *YoutubeSong) GetMetadata() *bot.SongMetadata {
+	return &s.metadata
 }
 
 func (s *YoutubeSong) GetHumanName() string {
@@ -149,44 +103,18 @@ func (s *YoutubeSong) GetHumanName() string {
 		return s.metadata.Title
 	}
 
-	if s.metadata.URL != "" {
-		return s.metadata.URL
-	}
-
-	return *s.searchTerm
+	return s.metadata.URL
 }
 
-func (s *YoutubeSong) GetMetadata(ctx context.Context) (*bot.SongMetadata, error) {
-	s.metadataMutex.Lock()
-	defer s.metadataMutex.Unlock()
+func (s *YoutubeSong) GetDCAData(ctx context.Context) (io.Reader, error) {
+	reader, writer := io.Pipe()
 
-	if s.metadataFetched {
-		return &s.metadata, nil
-	}
+	go func() {
+		if err := s.fetcher.GetDcaData(ctx, s, writer); err != nil {
+			writer.CloseWithError(fmt.Errorf("while getting DCA data: %w", err))
+		}
+		writer.Close()
+	}()
 
-	metadata, err := s.streamer.GetSongMetadata(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-
-	s.metadata = *metadata
-	s.metadataFetched = true
-
-	return &s.metadata, nil
-}
-
-func (s *YoutubeSong) GetDCAData(ctx context.Context) ([]byte, error) {
-	s.dataMutex.Lock()
-	defer s.dataMutex.Unlock()
-	if s.data != nil {
-		return s.data, nil
-	}
-
-	data, err := s.streamer.GetDcaData(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-
-	s.data = data
-	return s.data, nil
+	return bufio.NewReaderSize(reader, 1024*1024), nil
 }

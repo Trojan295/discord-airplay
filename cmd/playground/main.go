@@ -12,22 +12,15 @@ func main() {
 	ctx := context.Background()
 
 	//term := "Rammstein - Zick Zack (Official Video)"
+	//playlist
+	url := "https://www.youtube.com/watch?v=u7K72X4eo_s&list=RDEMHk07TM01OFpLd0Sok9_H2w"
 
-	streamer := sources.NewYoutubeFetcher()
-	song := sources.NewYoutubeSong(streamer).
-		WithURL("https://www.youtube.com/watch?v=hBTNyJ33LWI")
-
-	metadata, err := song.GetMetadata(ctx)
+	fetcher := sources.NewYoutubeFetcher()
+	songs, err := fetcher.LookupSongs(ctx, url)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println(metadata)
+	fmt.Println(songs)
 
-	data, err := song.GetDCAData(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("Bytes:", len(data))
 }

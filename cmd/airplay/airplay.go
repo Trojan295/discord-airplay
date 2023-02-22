@@ -26,8 +26,12 @@ var (
 	cfg          = &config.Config{}
 	streamer     *sources.YoutubeFetcher
 	guildPlayers map[GuildID]*bot.GuildPlayer
+
+	storage *bot.InMemoryStorage
 )
 
+// TODO: refactor main file and standarize responses
+// TODO: list - paginate or limit number of songs listed in playlist (Discord limit)
 func main() {
 	ctx, cancelCtx = context.WithCancel(context.Background())
 	defer cancelCtx()
@@ -35,6 +39,8 @@ func main() {
 	if err := envconfig.Process("AIR", cfg); err != nil {
 		log.Fatalf("failed to load envconfig: %v", err)
 	}
+
+	storage = bot.NewInMemoryStorage()
 
 	streamer = sources.NewYoutubeFetcher()
 	guildPlayers = make(map[GuildID]*bot.GuildPlayer)
@@ -45,7 +51,8 @@ func main() {
 		StopHandler(stopPlaying).
 		ListHandler(listPlaylist).
 		RemoveHandler(removeSong).
-		PlayingNowHandler(getPlayingSong)
+		PlayingNowHandler(getPlayingSong).
+		AddSongOrPlaylistHandler(addSongOrPlaylist)
 
 	slashCommands := commandHandler.GetSlashCommands()
 
@@ -60,8 +67,16 @@ func main() {
 	dg.AddHandler(guildCreate)
 
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		if h, ok := commandHandler.GetHandlers()[i.ApplicationCommandData().Name]; ok {
-			h(s, i)
+		switch i.Type {
+		case discordgo.InteractionMessageComponent:
+			if h, ok := commandHandler.GetComponentHandlers()[i.MessageComponentData().CustomID]; ok {
+				h(s, i)
+			}
+
+		default:
+			if h, ok := commandHandler.GetCommandHandlers()[i.ApplicationCommandData().Name]; ok {
+				h(s, i)
+			}
 		}
 	})
 
@@ -73,23 +88,20 @@ func main() {
 	}
 	defer dg.Close()
 
-	registeredCommands := make([]*discordgo.ApplicationCommand, 0, len(slashCommands))
-	for _, v := range slashCommands {
-		cmd, err := dg.ApplicationCommandCreate(dg.State.User.ID, cfg.GuildID, v)
-		if err != nil {
-			log.Panicf("Cannot create '%v' command: %v", v.Name, err)
-		}
-		registeredCommands = append(registeredCommands, cmd)
+	registeredCommands, err := dg.ApplicationCommandBulkOverwrite(dg.State.User.ID, cfg.GuildID, slashCommands)
+	if err != nil {
+		log.Fatalf("failed to bulk overwriter command: %v", err)
 	}
 
-	defer func() {
-		for _, v := range registeredCommands {
-			err := dg.ApplicationCommandDelete(dg.State.User.ID, cfg.GuildID, v.ID)
-			if err != nil {
-				log.Panicf("Cannot delete '%v' command: %v", v.Name, err)
+	if cfg.GuildID != "" {
+		defer func() {
+			for _, cmd := range registeredCommands {
+				if err := dg.ApplicationCommandDelete(dg.State.User.ID, cfg.GuildID, cmd.ID); err != nil {
+					log.Printf("failed to delete command %s: %s", cmd.Name, err.Error())
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	fmt.Println("airplay is now running.  Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
@@ -155,47 +167,123 @@ func playSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discor
 
 	for _, vs := range g.VoiceStates {
 		if vs.UserID == ic.Member.User.ID {
-			song := sources.ParseYoutubeInput(input, streamer)
-
 			if err := s.InteractionRespond(ic.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
-					Content: "Adding song...",
+					Content: "⏳ Adding song...",
 				},
 			}); err != nil {
 				log.Printf("failed to respond to add song interaction: %v", err)
 			}
 
-			go func(song bot.Song) {
-				metadata, err := song.GetMetadata(context.Background())
+			go func() {
+				songs, err := streamer.LookupSongs(ctx, input)
+				if err != nil {
+					log.Printf("failed to lookup song metadata: %v", err)
+					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
+						Content: "😨 Failed to add song",
+					})
+				}
 
 				if err != nil {
-					log.Printf("failed to get song metadata %s: %v", song.GetHumanName(), err)
+					log.Printf("failed to get song metadata for '%s': %v", input, err)
 					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
-						Content: "😟 Failed to add song",
+						Content: "😨 Failed to add song",
 					})
 					return
 				}
 
-				if !metadata.Playable {
+				if len(songs) == 0 {
 					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
-						Content: "😟 Cannot play the song",
+						Content: "😨 Could not find any playable songs",
 					})
 					return
 				}
 
-				player.AddSong(&ic.ChannelID, &vs.ChannelID, song)
+				if len(songs) == 1 {
+					song := songs[0]
+					metadata := song.GetMetadata()
 
-				commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
-					Content: fmt.Sprintf("⏯️ Added **%s** - %s to playlist", metadata.Title, metadata.URL),
-				})
-			}(song)
+					player.AddSong(&ic.ChannelID, &vs.ChannelID, song)
+
+					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
+						Content: fmt.Sprintf("➕ Added **%s** - %s to playlist", metadata.Title, metadata.URL),
+					})
+				} else {
+					storage.PutSongs(ic.ChannelID, songs)
+
+					commands.FollowupMessageCreate(s, ic.Interaction, &discordgo.WebhookParams{
+						Content: fmt.Sprintf("👀 The song is part of a playlist, which contains %d songs. What should I do?", len(songs)),
+						Components: []discordgo.MessageComponent{
+							discordgo.ActionsRow{
+								Components: []discordgo.MessageComponent{
+									discordgo.SelectMenu{
+										CustomID: "add_song_playlist",
+										Options: []discordgo.SelectMenuOption{
+											{Label: "Add song", Value: "song", Emoji: discordgo.ComponentEmoji{Name: "🎵"}},
+											{Label: "Add whole playlist", Value: "playlist", Emoji: discordgo.ComponentEmoji{Name: "🎶"}},
+										},
+									},
+								},
+							},
+						},
+					})
+				}
+			}()
 
 			return
 		}
 	}
 
 	commands.InteractionRespondMessage(s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+}
+
+func addSongOrPlaylist(s *discordgo.Session, ic *discordgo.InteractionCreate) {
+	values := ic.MessageComponentData().Values
+	if len(values) == 0 {
+		commands.InteractionRespondMessage(s, ic.Interaction, "😨 Something went wrong...")
+		return
+	}
+
+	g, err := s.State.Guild(ic.GuildID)
+	if err != nil {
+		log.Printf("failed to get guild %s: %v", ic.GuildID, err)
+		commands.InteractionRespondError(s, ic.Interaction)
+		return
+	}
+
+	value := values[0]
+	songs := storage.GetSongs(ic.ChannelID)
+	player := guildPlayers[GuildID(g.ID)]
+
+	var voiceChannelID *string = nil
+
+	for _, vs := range g.VoiceStates {
+		if vs.UserID == ic.Member.User.ID {
+			voiceChannelID = &vs.ChannelID
+			break
+		}
+	}
+
+	if voiceChannelID == nil {
+		commands.InteractionRespondMessage(s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+		return
+	}
+
+	switch value {
+	case "playlist":
+		for _, song := range songs {
+			player.AddSong(&ic.Message.ChannelID, voiceChannelID, song)
+		}
+		commands.InteractionRespondMessage(s, ic.Interaction, fmt.Sprintf("➕ Added %d songs to playlist", len(songs)))
+	default:
+		song := songs[0]
+		metadata := song.GetMetadata()
+		player.AddSong(&ic.Message.ChannelID, voiceChannelID, song)
+		commands.InteractionRespondMessage(s, ic.Interaction, fmt.Sprintf("➕ Added **%s** - %s to playlist", metadata.Title, metadata.URL))
+	}
+
+	storage.DeleteSongsKey(ic.ChannelID)
 }
 
 func skipSong(s *discordgo.Session, ic *discordgo.InteractionCreate, acido *discordgo.ApplicationCommandInteractionDataOption) {
@@ -234,19 +322,34 @@ func listPlaylist(s *discordgo.Session, ic *discordgo.InteractionCreate, acido *
 	player := guildPlayers[GuildID(g.ID)]
 
 	playlist := player.GetPlaylist()
-	message := ""
 
 	if len(playlist) == 0 {
-		message = "🫙 Playlist is empty"
+		commands.InteractionRespondMessage(s, ic.Interaction, "🫙 Playlist is empty")
 	} else {
+		builder := strings.Builder{}
+
 		for idx, song := range playlist {
-			message += fmt.Sprintf("%d. %s\n", idx+1, song)
+			line := fmt.Sprintf("%d. %s\n", idx+1, song)
+
+			if len(line)+builder.Len() > 4000 {
+				builder.WriteString("...")
+				break
+			}
+
+			builder.WriteString(fmt.Sprintf("%d. %s\n", idx+1, song))
 		}
 
-		message = strings.TrimSpace(message)
-	}
+		message := strings.TrimSpace(builder.String())
 
-	commands.InteractionRespondMessage(s, ic.Interaction, message)
+		commands.InteractionRespond(s, ic.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Embeds: []*discordgo.MessageEmbed{
+					{Title: "Playlist:", Description: message},
+				},
+			},
+		})
+	}
 }
 
 func removeSong(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
