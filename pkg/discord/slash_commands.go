@@ -1,10 +1,8 @@
-package commands
+package discord
 
-import (
-	"github.com/bwmarrin/discordgo"
-)
+import "github.com/bwmarrin/discordgo"
 
-type CommandHandler struct {
+type SlashCommandRouter struct {
 	commandPrefix string
 
 	playHandler       func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
@@ -17,48 +15,48 @@ type CommandHandler struct {
 	addSongOrPlaylistHandler func(*discordgo.Session, *discordgo.InteractionCreate)
 }
 
-func NewCommandHandler(commandPrefix string) *CommandHandler {
-	return &CommandHandler{
+func NewSlashCommandRouter(commandPrefix string) *SlashCommandRouter {
+	return &SlashCommandRouter{
 		commandPrefix: commandPrefix,
 	}
 }
 
-func (ch *CommandHandler) PlayHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) PlayHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.playHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) StopHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) StopHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.stopHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) SkipHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) SkipHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.skipHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) ListHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) ListHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.listHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) RemoveHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) RemoveHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.removeHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) PlayingNowHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *CommandHandler {
+func (ch *SlashCommandRouter) PlayingNowHandler(h func(*discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)) *SlashCommandRouter {
 	ch.playingNowHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) AddSongOrPlaylistHandler(h func(*discordgo.Session, *discordgo.InteractionCreate)) *CommandHandler {
+func (ch *SlashCommandRouter) AddSongOrPlaylistHandler(h func(*discordgo.Session, *discordgo.InteractionCreate)) *SlashCommandRouter {
 	ch.addSongOrPlaylistHandler = h
 	return ch
 }
 
-func (ch *CommandHandler) GetCommandHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
+func (ch *SlashCommandRouter) GetCommandHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
 	return map[string]func(*discordgo.Session, *discordgo.InteractionCreate){
 		ch.commandPrefix: func(s *discordgo.Session, ic *discordgo.InteractionCreate) {
 			options := ic.ApplicationCommandData().Options
@@ -82,13 +80,13 @@ func (ch *CommandHandler) GetCommandHandlers() map[string]func(*discordgo.Sessio
 	}
 }
 
-func (ch *CommandHandler) GetComponentHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
+func (ch *SlashCommandRouter) GetComponentHandlers() map[string]func(*discordgo.Session, *discordgo.InteractionCreate) {
 	return map[string]func(*discordgo.Session, *discordgo.InteractionCreate){
 		"add_song_playlist": ch.addSongOrPlaylistHandler,
 	}
 }
 
-func (ch *CommandHandler) GetSlashCommands() []*discordgo.ApplicationCommand {
+func (ch *SlashCommandRouter) GetSlashCommands() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{
 		{
 			Name:        ch.commandPrefix,

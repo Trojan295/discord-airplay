@@ -6,9 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
-	"sync"
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
 )
@@ -59,7 +59,7 @@ func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]bot.S
 	return songs, nil
 }
 
-func (s *YoutubeFetcher) GetDcaData(ctx context.Context, song *YoutubeSong, writer io.Writer) error {
+func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *YoutubeSong, writer io.Writer) error {
 	ytArgs := s.getYTdlpGetDataArgs(song)
 	ytCmd := strings.Join(append([]string{"yt-dlp"}, ytArgs...), " ")
 
@@ -69,6 +69,8 @@ func (s *YoutubeFetcher) GetDcaData(ctx context.Context, song *YoutubeSong, writ
 	if err := dcaCmd.Run(); err != nil {
 		return fmt.Errorf("while executing get DCA data pipe: %w", err)
 	}
+
+	fmt.Println("finished yt-dlp pipe")
 
 	return nil
 }
@@ -81,8 +83,7 @@ type YoutubeSong struct {
 	metadata bot.SongMetadata
 	fetcher  *YoutubeFetcher
 
-	dcaData   *bytes.Buffer
-	dataMutex sync.Mutex
+	dcaData *bytes.Buffer
 }
 
 func NewYoutubeSong(metadata bot.SongMetadata, streamer *YoutubeFetcher) *YoutubeSong {
@@ -108,13 +109,15 @@ func (s *YoutubeSong) GetHumanName() string {
 
 func (s *YoutubeSong) GetDCAData(ctx context.Context) (io.Reader, error) {
 	reader, writer := io.Pipe()
+	bufferedWriter := bufio.NewWriterSize(writer, 100*1024)
 
 	go func() {
-		if err := s.fetcher.GetDcaData(ctx, s, writer); err != nil {
-			writer.CloseWithError(fmt.Errorf("while getting DCA data: %w", err))
+		err := s.fetcher.GetDCAData(ctx, s, bufferedWriter)
+		if err := bufferedWriter.Flush(); err != nil {
+			log.Printf("failed to flush buffered writer: %v", err)
 		}
-		writer.Close()
+		writer.CloseWithError(err)
 	}()
 
-	return bufio.NewReaderSize(reader, 1024*1024), nil
+	return reader, nil
 }

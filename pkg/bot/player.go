@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 	"time"
 
-	"github.com/Trojan295/discord-airplay/pkg/codec"
-	"github.com/bwmarrin/discordgo"
+	"go.uber.org/zap"
 )
 
 type Trigger struct {
@@ -30,53 +28,62 @@ type Song interface {
 	GetDCAData(ctx context.Context) (io.Reader, error)
 }
 
-type ASRService interface {
-	FeedOpusData(opusData []byte) error
+type VoiceChatSession interface {
+	Close() error
+	SendMessage(channelID string, message string) error
+	JoinVoiceChannel(channelID string) error
+	LeaveVoiceChannel() error
+	SendAudio(ctx context.Context, r io.Reader) error
 }
 
 type GuildPlayer struct {
-	sess    *discordgo.Session
-	guildID string
+	session VoiceChatSession
 
 	ctx context.Context
 
-	triggerCh       chan Trigger
-	mutex           sync.Mutex
-	voiceChannelID  string
-	textChannelID   string
-	voiceConnection *discordgo.VoiceConnection
-	playlist        []Song
-	playedSong      Song
+	triggerCh      chan Trigger
+	mutex          sync.RWMutex
+	voiceChannelID string
+	textChannelID  string
+	playlist       []Song
+	playedSong     Song
+	songCtxCancel  context.CancelFunc
 
-	songCtxCancel context.CancelFunc
+	logger *zap.Logger
 }
 
-func NewGuildPlayer(ctx context.Context, sess *discordgo.Session, guildID string) *GuildPlayer {
+func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string) *GuildPlayer {
 	return &GuildPlayer{
 		ctx:        ctx,
-		sess:       sess,
-		guildID:    guildID,
+		session:    session,
 		triggerCh:  make(chan Trigger),
 		playlist:   []Song{},
 		playedSong: nil,
-		mutex:      sync.Mutex{},
+		mutex:      sync.RWMutex{},
+		logger:     zap.NewNop(),
 	}
 }
 
+func (p *GuildPlayer) WithLogger(l *zap.Logger) *GuildPlayer {
+	p.logger = l
+	return p
+}
+
+func (p *GuildPlayer) Close() error {
+	p.songCtxCancel()
+	return p.session.Close()
+}
+
 func (p *GuildPlayer) SendMessage(message string) {
-	if p.textChannelID != "" {
-		if _, err := p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
-			Content: message,
-		}); err != nil {
-			log.Printf("failed to send message to guild %s: %v", p.guildID, err.Error())
-		}
+	if err := p.session.SendMessage(p.textChannelID, message); err != nil {
+		p.logger.Error("failed to send message", zap.Error(err))
 	}
 }
 
 func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
 	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	p.playlist = append(p.playlist, s)
-	p.mutex.Unlock()
 
 	go func() {
 		p.triggerCh <- Trigger{
@@ -115,19 +122,21 @@ func (p *GuildPlayer) RemoveSong(position int) (Song, error) {
 	}
 
 	song := p.playlist[index]
-	p.playlist = append(p.playlist[:index], p.playlist[index+1:]...)
+
+	copy(p.playlist[index:], p.playlist[index+1:])
+	p.playlist = p.playlist[:len(p.playlist)-1]
 
 	return song, nil
 }
 
 func (p *GuildPlayer) GetPlaylist() []string {
-	playlist := []string{}
+	playlist := make([]string, len(p.playlist))
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
-	for _, song := range p.playlist {
-		playlist = append(playlist, song.GetHumanName())
+	for i, song := range p.playlist {
+		playlist[i] = song.GetHumanName()
 	}
 
 	return playlist
@@ -175,7 +184,7 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 				}
 
 				if err := p.playPlaylist(ctx); err != nil {
-					log.Printf("failed to play playlist: %v", err)
+					p.logger.Error("failed to play playlist", zap.Error(err))
 				}
 			}
 		}
@@ -183,23 +192,20 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 }
 
 func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
-	vc, err := p.sess.ChannelVoiceJoin(p.guildID, p.voiceChannelID, false, true)
-	if err != nil {
-		return fmt.Errorf("while joining voice channel: %w", err)
+	if err := p.session.JoinVoiceChannel(p.voiceChannelID); err != nil {
+		return fmt.Errorf("failed to joib voice channel: %w", err)
 	}
 
-	p.voiceConnection = vc
-
 	defer func() {
-		if err := vc.Disconnect(); err != nil {
-			log.Printf("failed to disconnect from voice channel: %v", err)
+		if err := p.session.LeaveVoiceChannel(); err != nil {
+			p.logger.Error("failed to leave voice channel", zap.Error(err))
 		}
 	}()
 
 	for {
-		p.mutex.Lock()
+		p.mutex.RLock()
 		playlistLen := len(p.playlist)
-		p.mutex.Unlock()
+		p.mutex.RUnlock()
 
 		if playlistLen == 0 {
 			break
@@ -221,27 +227,16 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 
 		metadata := song.GetMetadata()
 		message := fmt.Sprintf("▶️ Playing song **%s** - %s", metadata.Title, metadata.URL)
-		if _, err := p.sess.ChannelMessageSendComplex(p.textChannelID, &discordgo.MessageSend{
-			Content: message,
-		}); err != nil {
-			log.Printf("failed to send playing song message: %v", err)
+
+		if err := p.session.SendMessage(p.textChannelID, message); err != nil {
+			return fmt.Errorf("while sending message with song name: %w", err)
 		}
 
-		if err := p.voiceConnection.Speaking(true); err != nil {
-			return fmt.Errorf("while starting to speak: %w", err)
-		}
-
-		p.playedSong = song
-
-		if err := codec.StreamDCAData(songCtx, dcaData, p.voiceConnection.OpusSend); err != nil {
-			return fmt.Errorf("while streaming DCA data: %w", err)
+		if err := p.session.SendAudio(songCtx, dcaData); err != nil {
+			return fmt.Errorf("while sending audio data: %w", err)
 		}
 
 		p.playedSong = nil
-
-		if err := p.voiceConnection.Speaking(false); err != nil {
-			return fmt.Errorf("while sstopping to speak: %w", err)
-		}
 
 		time.Sleep(250 * time.Millisecond)
 	}
