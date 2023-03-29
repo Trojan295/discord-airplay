@@ -3,24 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 
 	"github.com/Trojan295/discord-airplay/pkg/sources"
 )
 
 func main() {
-	ctx := context.Background()
+	token := os.Getenv("AIR_OPENAITOKEN")
 
-	//term := "Rammstein - Zick Zack (Official Video)"
-	//playlist
-	url := "https://www.youtube.com/watch?v=u7K72X4eo_s&list=RDEMHk07TM01OFpLd0Sok9_H2w"
+	dj := sources.NewChatGPTPlaylistGenerator(token)
 
-	fetcher := sources.NewYoutubeFetcher()
-	songs, err := fetcher.LookupSongs(ctx, url)
-	if err != nil {
-		log.Fatal(err)
-	}
+	description := os.Args[1]
+	songs, err := dj.GeneratePlaylist(context.Background(), description)
 
-	fmt.Println(songs)
-
+	fmt.Println(songs, err)
 }

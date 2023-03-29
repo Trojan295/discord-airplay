@@ -63,7 +63,6 @@ func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, reader io
 
 	if err := session.voiceConnection.Speaking(false); err != nil {
 		return fmt.Errorf("while stopping to speak: %w", err)
-
 	}
 
 	return nil

@@ -16,26 +16,32 @@ type SongLookuper interface {
 	LookupSongs(ctx context.Context, input string) ([]bot.Song, error)
 }
 
+type PlaylistGenerator interface {
+	GeneratePlaylist(ctx context.Context, input string) ([]string, error)
+}
+
 type InteractionHandler struct {
 	ctx          context.Context
 	discordToken string
 
 	guildPlayers map[GuildID]*bot.GuildPlayer
 
-	songLookuper SongLookuper
-	storage      *bot.InMemoryStorage
+	playlistGenerator PlaylistGenerator
+	songLookuper      SongLookuper
+	storage           *bot.InMemoryStorage
 
 	logger *zap.Logger
 }
 
-func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, storage *bot.InMemoryStorage) *InteractionHandler {
+func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage *bot.InMemoryStorage) *InteractionHandler {
 	handler := &InteractionHandler{
-		ctx:          ctx,
-		discordToken: discordToken,
-		guildPlayers: make(map[GuildID]*bot.GuildPlayer),
-		songLookuper: songLookuper,
-		storage:      storage,
-		logger:       zap.NewNop(),
+		ctx:               ctx,
+		discordToken:      discordToken,
+		guildPlayers:      make(map[GuildID]*bot.GuildPlayer),
+		playlistGenerator: playlistGenerator,
+		songLookuper:      songLookuper,
+		storage:           storage,
+		logger:            zap.NewNop(),
 	}
 
 	return handler
@@ -99,26 +105,17 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 
 	for _, vs := range g.VoiceStates {
 		if vs.UserID == ic.Member.User.ID {
-			if err := s.InteractionRespond(ic.Interaction, &discordgo.InteractionResponse{
+			InteractionRespond(handler.logger, s, ic.Interaction, &discordgo.InteractionResponse{
 				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 				Data: &discordgo.InteractionResponseData{
 					Content: "⏳ Adding song...",
 				},
-			}); err != nil {
-				logger.Info("failed to respond to add song interaction", zap.Error(err))
-			}
+			})
 
 			go func() {
 				songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
 				if err != nil {
-					logger.Info("failed to lookup song metadata", zap.Error(err))
-					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: "😨 Failed to add song",
-					})
-				}
-
-				if err != nil {
-					logger.Info("failed to get song metadata", zap.String("songInput", input), zap.Error(err))
+					logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
 					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
 						Content: "😨 Failed to add song",
 					})
@@ -168,6 +165,85 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 	}
 
 	InteractionRespondMessage(handler.logger, s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+}
+
+func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
+	logger := handler.logger.With(zap.String("guildID", ic.GuildID))
+
+	g, err := s.State.Guild(ic.GuildID)
+	if err != nil {
+		logger.Info("failed to get guild", zap.Error(err))
+		InteractionRespondServerError(handler.logger, s, ic.Interaction)
+		return
+	}
+
+	player := handler.getGuildPlayer(GuildID(g.ID))
+
+	optionMap := make(map[string]*discordgo.ApplicationCommandInteractionDataOption, len(opt.Options))
+	for _, opt := range opt.Options {
+		optionMap[opt.Name] = opt
+	}
+
+	description := optionMap["description"].StringValue()
+
+	var voiceState *discordgo.VoiceState
+
+	for _, vs := range g.VoiceStates {
+		if vs.UserID == ic.Member.User.ID {
+			voiceState = vs
+			break
+		}
+	}
+
+	if voiceState == nil {
+		InteractionRespondMessage(handler.logger, s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+		return
+	}
+
+	go func() {
+		songs, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, description)
+		if err != nil {
+			logger.Info("failed to generate playlist", zap.Error(err))
+			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+				Content: "😨 Failed to generate playlist",
+			})
+			return
+		}
+
+		logger.Debug("generated playlist", zap.Any("songs", songs))
+
+		resposeMessage := strings.Builder{}
+
+		for _, input := range songs {
+			songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
+			if err != nil {
+				logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
+				continue
+			}
+
+			if len(songs) == 0 {
+				continue
+			}
+
+			song := songs[0]
+			player.AddSong(&ic.ChannelID, &voiceState.ChannelID, song)
+
+			resposeMessage.WriteString(fmt.Sprintf("- %s\n", song.GetMetadata().Title))
+		}
+
+		FollowupMessageCreate(logger, s, ic.Interaction, &discordgo.WebhookParams{
+			Embeds: []*discordgo.MessageEmbed{
+				{Title: "Added songs:", Description: resposeMessage.String()},
+			},
+		})
+	}()
+
+	InteractionRespond(logger, s, ic.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "⏳ Generating playlist...",
+		},
+	})
 }
 
 func (handler *InteractionHandler) AddSongOrPlaylist(s *discordgo.Session, ic *discordgo.InteractionCreate) {
@@ -338,13 +414,14 @@ func (handler *InteractionHandler) GetPlayingSong(s *discordgo.Session, ic *disc
 func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildPlayer {
 	dg, err := discordgo.New("Bot " + handler.discordToken)
 	if err != nil {
-		fmt.Println("Error creating Discord session: ", err)
+		handler.logger.Error("failed to create Discord session", zap.Error(err))
 		return nil
 	}
 
 	err = dg.Open()
 	if err != nil {
-		fmt.Println("Error opening Discord session: ", err)
+		handler.logger.Error("failed to open Discord session", zap.Error(err))
+		return nil
 	}
 
 	voiceChat := &DiscordVoiceChatSession{
@@ -352,7 +429,7 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 		guildID:        string(guildID),
 	}
 
-	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID))
+	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID)).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
 }
 

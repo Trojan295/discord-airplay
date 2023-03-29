@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -49,18 +50,21 @@ type GuildPlayer struct {
 	playedSong     Song
 	songCtxCancel  context.CancelFunc
 
+	audioBufferSize int
+
 	logger *zap.Logger
 }
 
 func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string) *GuildPlayer {
 	return &GuildPlayer{
-		ctx:        ctx,
-		session:    session,
-		triggerCh:  make(chan Trigger),
-		playlist:   []Song{},
-		playedSong: nil,
-		mutex:      sync.RWMutex{},
-		logger:     zap.NewNop(),
+		ctx:             ctx,
+		session:         session,
+		triggerCh:       make(chan Trigger),
+		playlist:        []Song{},
+		playedSong:      nil,
+		mutex:           sync.RWMutex{},
+		logger:          zap.NewNop(),
+		audioBufferSize: 1024 * 1024, // 1 MiB
 	}
 }
 
@@ -192,11 +196,13 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 }
 
 func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
+	p.logger.Debug("joining voice channel", zap.String("channel", p.voiceChannelID))
 	if err := p.session.JoinVoiceChannel(p.voiceChannelID); err != nil {
-		return fmt.Errorf("failed to joib voice channel: %w", err)
+		return fmt.Errorf("failed to join voice channel: %w", err)
 	}
 
 	defer func() {
+		p.logger.Debug("leaving voice channel", zap.String("channel", p.voiceChannelID))
 		if err := p.session.LeaveVoiceChannel(); err != nil {
 			p.logger.Error("failed to leave voice channel", zap.Error(err))
 		}
@@ -208,35 +214,42 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 		p.mutex.RUnlock()
 
 		if playlistLen == 0 {
+			p.logger.Debug("playlist is empty")
 			break
 		}
+
+		p.logger.Debug("playing next song from playlist")
 
 		p.mutex.Lock()
 		song := p.playlist[0]
 		p.playlist = p.playlist[1:]
+		p.mutex.Unlock()
 
 		var songCtx context.Context
 		songCtx, p.songCtxCancel = context.WithCancel(ctx)
 
-		p.mutex.Unlock()
+		metadata := song.GetMetadata()
+		message := fmt.Sprintf("▶️ Playing song **%s** - %s", metadata.Title, metadata.URL)
+
+		logger := p.logger.With(zap.String("title", metadata.Title), zap.String("url", metadata.URL))
+
+		if err := p.session.SendMessage(p.textChannelID, message); err != nil {
+			return fmt.Errorf("while sending message with song name: %w", err)
+		}
 
 		dcaData, err := song.GetDCAData(songCtx)
 		if err != nil {
 			return fmt.Errorf("while getting DCA data from song %v: %w", song, err)
 		}
 
-		metadata := song.GetMetadata()
-		message := fmt.Sprintf("▶️ Playing song **%s** - %s", metadata.Title, metadata.URL)
-
-		if err := p.session.SendMessage(p.textChannelID, message); err != nil {
-			return fmt.Errorf("while sending message with song name: %w", err)
-		}
-
-		if err := p.session.SendAudio(songCtx, dcaData); err != nil {
+		audioReader := bufio.NewReaderSize(dcaData, p.audioBufferSize)
+		logger.Debug("sending audio stream")
+		if err := p.session.SendAudio(songCtx, audioReader); err != nil {
 			return fmt.Errorf("while sending audio data: %w", err)
 		}
 
 		p.playedSong = nil
+		logger.Debug("stopped playing")
 
 		time.Sleep(250 * time.Millisecond)
 	}

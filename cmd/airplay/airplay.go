@@ -33,6 +33,10 @@ var (
 // TODO: store state in etcd
 func main() {
 	loggerCfg := zap.NewProductionConfig()
+	if os.Getenv("AIR_DEBUG") == "1" {
+		loggerCfg = zap.NewDevelopmentConfig()
+	}
+
 	loggerCfg.EncoderConfig.EncodeTime = zapcore.RFC3339TimeEncoder
 	logger, _ = loggerCfg.Build()
 
@@ -45,8 +49,9 @@ func main() {
 
 	storage = bot.NewInMemoryStorage()
 	youtubeFetcher = sources.NewYoutubeFetcher()
+	playlistGenerator := sources.NewChatGPTPlaylistGenerator(cfg.OpenAIToken)
 
-	handler := discord.NewInteractionHandler(ctx, cfg.DiscordToken, youtubeFetcher, storage).WithLogger(logger.Named("interactionHandler"))
+	handler := discord.NewInteractionHandler(ctx, cfg.DiscordToken, youtubeFetcher, playlistGenerator, storage).WithLogger(logger.Named("interactionHandler"))
 	commandHandler := discord.NewSlashCommandRouter(cfg.CommandPrefix).
 		PlayHandler(handler.PlaySong).
 		SkipHandler(handler.SkipSong).
@@ -54,6 +59,7 @@ func main() {
 		ListHandler(handler.ListPlaylist).
 		RemoveHandler(handler.RemoveSong).
 		PlayingNowHandler(handler.GetPlayingSong).
+		DJHandler(handler.CreatePlaylist).
 		AddSongOrPlaylistHandler(handler.AddSongOrPlaylist)
 
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)

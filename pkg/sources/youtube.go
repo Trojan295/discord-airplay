@@ -13,6 +13,10 @@ import (
 	"github.com/Trojan295/discord-airplay/pkg/bot"
 )
 
+const (
+	downloadBuffer = 100 * 1024 // 100 KiB
+)
+
 type YoutubeFetcher struct {
 }
 
@@ -23,7 +27,7 @@ func NewYoutubeFetcher() *YoutubeFetcher {
 func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]bot.Song, error) {
 	args := []string{"--print", "title,original_url,is_live", "--flat-playlist"}
 
-	if strings.HasPrefix(input, "https://www.youtube.com") {
+	if strings.HasPrefix(input, "https://") {
 		args = append(args, input)
 	} else {
 		args = append(args, fmt.Sprintf("ytsearch:%s", input))
@@ -64,13 +68,17 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *YoutubeSong, writ
 	ytCmd := strings.Join(append([]string{"yt-dlp"}, ytArgs...), " ")
 
 	dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("%s | ffmpeg -i pipe: -f s16le -ar 48000 -ac 2 pipe:1 | dca", ytCmd))
-	dcaCmd.Stdout = writer
+
+	bw := bufio.NewWriterSize(writer, downloadBuffer)
+	dcaCmd.Stdout = bw
 
 	if err := dcaCmd.Run(); err != nil {
 		return fmt.Errorf("while executing get DCA data pipe: %w", err)
 	}
 
-	fmt.Println("finished yt-dlp pipe")
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("while flushing buffer: %w", err)
+	}
 
 	return nil
 }
@@ -109,14 +117,12 @@ func (s *YoutubeSong) GetHumanName() string {
 
 func (s *YoutubeSong) GetDCAData(ctx context.Context) (io.Reader, error) {
 	reader, writer := io.Pipe()
-	bufferedWriter := bufio.NewWriterSize(writer, 100*1024)
 
 	go func() {
-		err := s.fetcher.GetDCAData(ctx, s, bufferedWriter)
-		if err := bufferedWriter.Flush(); err != nil {
-			log.Printf("failed to flush buffered writer: %v", err)
+		if err := s.fetcher.GetDCAData(ctx, s, writer); err != nil {
+			log.Printf("failed to get DCA data: %v", err)
 		}
-		writer.CloseWithError(err)
+		writer.Close()
 	}()
 
 	return reader, nil

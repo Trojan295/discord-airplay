@@ -7,6 +7,8 @@ metadata:
   namespace: default
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: airplay
@@ -19,6 +21,8 @@ spec:
         - env:
             - name: AIR_DISCORDTOKEN
               value: ${AIR_DISCORDTOKEN}
+            - name: AIR_OPENAITOKEN
+              value: ${AIR_OPENAITOKEN}
           image: trojan295/airplay
           imagePullPolicy: Always
           name: airplay
