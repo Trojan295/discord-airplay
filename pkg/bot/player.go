@@ -3,13 +3,15 @@ package bot
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+var ErrNoSongs = errors.New("no songs available")
 
 type Trigger struct {
 	Command        string
@@ -21,6 +23,8 @@ type SongMetadata struct {
 	Title    string
 	URL      string
 	Playable bool
+
+	Duration time.Duration
 }
 
 type Song interface {
@@ -37,16 +41,23 @@ type VoiceChatSession interface {
 	SendAudio(ctx context.Context, r io.Reader) error
 }
 
+type PlaylistStore interface {
+	AppendSong(Song) error
+	RemoveSong(int) (Song, error)
+	ClearPlaylist() error
+	GetSongs() ([]Song, error)
+	PopFirstSong() (Song, error)
+}
+
 type GuildPlayer struct {
 	session VoiceChatSession
 
 	ctx context.Context
 
 	triggerCh      chan Trigger
-	mutex          sync.RWMutex
 	voiceChannelID string
 	textChannelID  string
-	playlist       []Song
+	playlistStore  PlaylistStore
 	playedSong     Song
 	songCtxCancel  context.CancelFunc
 
@@ -55,14 +66,13 @@ type GuildPlayer struct {
 	logger *zap.Logger
 }
 
-func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string) *GuildPlayer {
+func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, playlistStore PlaylistStore) *GuildPlayer {
 	return &GuildPlayer{
 		ctx:             ctx,
 		session:         session,
 		triggerCh:       make(chan Trigger),
-		playlist:        []Song{},
+		playlistStore:   playlistStore,
 		playedSong:      nil,
-		mutex:           sync.RWMutex{},
 		logger:          zap.NewNop(),
 		audioBufferSize: 1024 * 1024, // 1 MiB
 	}
@@ -85,9 +95,7 @@ func (p *GuildPlayer) SendMessage(message string) {
 }
 
 func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	p.playlist = append(p.playlist, s)
+	p.playlistStore.AppendSong(s)
 
 	go func() {
 		p.triggerCh <- Trigger{
@@ -105,10 +113,7 @@ func (p *GuildPlayer) SkipSong() {
 }
 
 func (p *GuildPlayer) Stop() {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	p.playlist = make([]Song, 0)
+	p.playlistStore.ClearPlaylist()
 
 	if p.songCtxCancel != nil {
 		p.songCtxCancel()
@@ -116,34 +121,26 @@ func (p *GuildPlayer) Stop() {
 }
 
 func (p *GuildPlayer) RemoveSong(position int) (Song, error) {
-	index := position - 1
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	if index < 0 || index > len(p.playlist)-1 {
-		return nil, fmt.Errorf("wrong position")
+	song, err := p.playlistStore.RemoveSong(position)
+	if err != nil {
+		return nil, fmt.Errorf("while removing song: %w", err)
 	}
-
-	song := p.playlist[index]
-
-	copy(p.playlist[index:], p.playlist[index+1:])
-	p.playlist = p.playlist[:len(p.playlist)-1]
 
 	return song, nil
 }
 
-func (p *GuildPlayer) GetPlaylist() []string {
-	playlist := make([]string, len(p.playlist))
+func (p *GuildPlayer) GetPlaylist() ([]string, error) {
+	songs, err := p.playlistStore.GetSongs()
+	if err != nil {
+		return nil, fmt.Errorf("while getting songs: %w", err)
+	}
 
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-
-	for i, song := range p.playlist {
+	playlist := make([]string, len(songs))
+	for i, song := range songs {
 		playlist[i] = song.GetHumanName()
 	}
 
-	return playlist
+	return playlist, err
 }
 
 func (p *GuildPlayer) GetPlayedSong() Song {
@@ -179,11 +176,13 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 					p.voiceChannelID = *trigger.VoiceChannelID
 				}
 
-				p.mutex.Lock()
-				playlistLen := len(p.playlist)
-				p.mutex.Unlock()
+				songs, err := p.playlistStore.GetSongs()
+				if err != nil {
+					p.logger.Error("failed to get songs", zap.Error(err))
+					continue
+				}
 
-				if playlistLen == 0 {
+				if len(songs) == 0 {
 					continue
 				}
 
@@ -209,21 +208,14 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 	}()
 
 	for {
-		p.mutex.RLock()
-		playlistLen := len(p.playlist)
-		p.mutex.RUnlock()
-
-		if playlistLen == 0 {
+		song, err := p.playlistStore.PopFirstSong()
+		if err == ErrNoSongs {
 			p.logger.Debug("playlist is empty")
 			break
 		}
-
-		p.logger.Debug("playing next song from playlist")
-
-		p.mutex.Lock()
-		song := p.playlist[0]
-		p.playlist = p.playlist[1:]
-		p.mutex.Unlock()
+		if err != nil {
+			return fmt.Errorf("while poping first song: %w", err)
+		}
 
 		var songCtx context.Context
 		songCtx, p.songCtxCancel = context.WithCancel(ctx)

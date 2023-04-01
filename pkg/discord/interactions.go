@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
+	"github.com/Trojan295/discord-airplay/pkg/bot/store"
+	"github.com/Trojan295/discord-airplay/pkg/sources"
 	"github.com/bwmarrin/discordgo"
 	"go.uber.org/zap"
 )
@@ -17,7 +19,13 @@ type SongLookuper interface {
 }
 
 type PlaylistGenerator interface {
-	GeneratePlaylist(ctx context.Context, input string) ([]string, error)
+	GeneratePlaylist(ctx context.Context, input string) (*sources.PlaylistResponse, error)
+}
+
+type InteractionStorage interface {
+	SaveSongList(channelID string, list []bot.Song)
+	GetSongList(channelID string) []bot.Song
+	DeleteSongList(channelID string)
 }
 
 type InteractionHandler struct {
@@ -28,12 +36,12 @@ type InteractionHandler struct {
 
 	playlistGenerator PlaylistGenerator
 	songLookuper      SongLookuper
-	storage           *bot.InMemoryStorage
+	storage           InteractionStorage
 
 	logger *zap.Logger
 }
 
-func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage *bot.InMemoryStorage) *InteractionHandler {
+func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage InteractionStorage) *InteractionHandler {
 	handler := &InteractionHandler{
 		ctx:               ctx,
 		discordToken:      discordToken,
@@ -136,10 +144,10 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 					player.AddSong(&ic.ChannelID, &vs.ChannelID, song)
 
 					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: fmt.Sprintf("➕ Added **%s** - %s to playlist", metadata.Title, metadata.URL),
+						Content: fmt.Sprintf("➕ Added **%s** (%s) - %s to playlist", metadata.Title, metadata.Duration, metadata.URL),
 					})
 				} else {
-					handler.storage.PutSongs(ic.ChannelID, songs)
+					handler.storage.SaveSongList(ic.ChannelID, songs)
 
 					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
 						Content: fmt.Sprintf("👀 The song is part of a playlist, which contains %d songs. What should I do?", len(songs)),
@@ -201,7 +209,7 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 	}
 
 	go func() {
-		songs, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, description)
+		playlist, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, description)
 		if err != nil {
 			logger.Info("failed to generate playlist", zap.Error(err))
 			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
@@ -210,11 +218,11 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 			return
 		}
 
-		logger.Debug("generated playlist", zap.Any("songs", songs))
+		logger.Debug("generated playlist", zap.Any("songs", playlist.Playlist))
 
 		resposeMessage := strings.Builder{}
 
-		for _, input := range songs {
+		for _, input := range playlist.Playlist {
 			songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
 			if err != nil {
 				logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
@@ -228,12 +236,13 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 			song := songs[0]
 			player.AddSong(&ic.ChannelID, &voiceState.ChannelID, song)
 
-			resposeMessage.WriteString(fmt.Sprintf("- %s\n", song.GetMetadata().Title))
+			resposeMessage.WriteString(fmt.Sprintf("- %s (%s)\n", song.GetMetadata().Title, song.GetMetadata().Duration))
 		}
 
 		FollowupMessageCreate(logger, s, ic.Interaction, &discordgo.WebhookParams{
+			Content: playlist.Intro,
 			Embeds: []*discordgo.MessageEmbed{
-				{Title: "Added songs:", Description: resposeMessage.String()},
+				{Title: "Songs:", Description: resposeMessage.String()},
 			},
 		})
 	}()
@@ -261,7 +270,7 @@ func (handler *InteractionHandler) AddSongOrPlaylist(s *discordgo.Session, ic *d
 	}
 
 	value := values[0]
-	songs := handler.storage.GetSongs(ic.ChannelID)
+	songs := handler.storage.GetSongList(ic.ChannelID)
 	if len(songs) == 0 {
 		InteractionRespondMessage(handler.logger, s, ic.Interaction, "Interaction was already selected")
 		return
@@ -296,7 +305,7 @@ func (handler *InteractionHandler) AddSongOrPlaylist(s *discordgo.Session, ic *d
 		InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("➕ Added **%s** - %s to playlist", metadata.Title, metadata.URL))
 	}
 
-	handler.storage.DeleteSongsKey(ic.ChannelID)
+	handler.storage.DeleteSongList(ic.ChannelID)
 }
 
 func (handler *InteractionHandler) StopPlaying(s *discordgo.Session, ic *discordgo.InteractionCreate, acido *discordgo.ApplicationCommandInteractionDataOption) {
@@ -336,7 +345,11 @@ func (handler *InteractionHandler) ListPlaylist(s *discordgo.Session, ic *discor
 	}
 
 	player := handler.getGuildPlayer(GuildID(g.ID))
-	playlist := player.GetPlaylist()
+	playlist, err := player.GetPlaylist()
+	if err != nil {
+		handler.logger.Error("failed to get playlist", zap.Error(err))
+		return
+	}
 
 	if len(playlist) == 0 {
 		InteractionRespondMessage(handler.logger, s, ic.Interaction, "🫙 Playlist is empty")
@@ -387,6 +400,7 @@ func (handler *InteractionHandler) RemoveSong(s *discordgo.Session, ic *discordg
 	song, err := player.RemoveSong(int(position))
 	if err != nil {
 		InteractionRespondServerError(handler.logger, s, ic.Interaction)
+		return
 	}
 
 	InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("🗑️ Removed song **%v** from playlist", song.GetHumanName()))
@@ -429,7 +443,9 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 		guildID:        string(guildID),
 	}
 
-	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID)).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
+	playlistStore := store.NewInmemoryPlaylistStorage()
+
+	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
 }
 

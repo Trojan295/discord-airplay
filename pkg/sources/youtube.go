@@ -8,7 +8,9 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
 )
@@ -25,7 +27,7 @@ func NewYoutubeFetcher() *YoutubeFetcher {
 }
 
 func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]bot.Song, error) {
-	args := []string{"--print", "title,original_url,is_live", "--flat-playlist"}
+	args := []string{"--print", "title,original_url,is_live,duration", "--flat-playlist"}
 
 	if strings.HasPrefix(input, "https://") {
 		args = append(args, input)
@@ -47,10 +49,13 @@ func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]bot.S
 
 	songs := make([]bot.Song, 0, songCount)
 	for i := 0; i < songCount; i++ {
+		duration, _ := strconv.ParseFloat(ytOutLines[4*i+3], 32)
+
 		metadata := bot.SongMetadata{
-			Title:    ytOutLines[3*i],
-			URL:      ytOutLines[3*i+1],
-			Playable: ytOutLines[3*i+2] == "False" || ytOutLines[3*i+2] == "NA",
+			Title:    ytOutLines[4*i],
+			URL:      ytOutLines[4*i+1],
+			Playable: ytOutLines[4*i+2] == "False" || ytOutLines[3*i+2] == "NA",
+			Duration: time.Second * time.Duration(duration),
 		}
 		if !metadata.Playable {
 			continue
@@ -118,12 +123,12 @@ func (s *YoutubeSong) GetHumanName() string {
 func (s *YoutubeSong) GetDCAData(ctx context.Context) (io.Reader, error) {
 	reader, writer := io.Pipe()
 
-	go func() {
-		if err := s.fetcher.GetDCAData(ctx, s, writer); err != nil {
+	go func(w io.WriteCloser) {
+		if err := s.fetcher.GetDCAData(ctx, s, w); err != nil {
 			log.Printf("failed to get DCA data: %v", err)
 		}
-		writer.Close()
-	}()
+		w.Close()
+	}(writer)
 
 	return reader, nil
 }

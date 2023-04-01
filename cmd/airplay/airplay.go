@@ -6,7 +6,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Trojan295/discord-airplay/pkg/bot"
 	"github.com/Trojan295/discord-airplay/pkg/config"
 	"github.com/Trojan295/discord-airplay/pkg/discord"
 	"github.com/Trojan295/discord-airplay/pkg/sources"
@@ -27,7 +26,7 @@ var (
 	cfg            = &config.Config{}
 	youtubeFetcher *sources.YoutubeFetcher
 
-	storage *bot.InMemoryStorage
+	storage *discord.InMemoryInteractionStorage
 )
 
 // TODO: store state in etcd
@@ -47,7 +46,7 @@ func main() {
 		logger.Fatal("failed to load envconfig", zap.Error(err))
 	}
 
-	storage = bot.NewInMemoryStorage()
+	storage = discord.NewInMemoryStorage()
 	youtubeFetcher = sources.NewYoutubeFetcher()
 	playlistGenerator := sources.NewChatGPTPlaylistGenerator(cfg.OpenAIToken)
 

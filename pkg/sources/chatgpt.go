@@ -20,15 +20,32 @@ func NewChatGPTPlaylistGenerator(token string) *ChatGPTPlaylistGenerator {
 	}
 }
 
-func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, input string) ([]string, error) {
+type PlaylistResponse struct {
+	Intro    string
+	Playlist []string
+}
+
+func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, input string) (*PlaylistResponse, error) {
 	resp, err := g.openAIClient.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
 			Model: openai.GPT3Dot5Turbo,
 			Messages: []openai.ChatCompletionMessage{
 				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: "You are DJ Airyk.",
+				},
+				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf("Create a playlist of %s songs", input),
+					Content: "Create for me a playlist.",
+				},
+				{
+					Role:    openai.ChatMessageRoleAssistant,
+					Content: "What type of songs should it contain?",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: input,
 				},
 			},
 		},
@@ -51,5 +68,8 @@ func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, input s
 		playlist = append(playlist, strings.TrimSpace(matches[1]))
 	}
 
-	return playlist, nil
+	return &PlaylistResponse{
+		Intro:    lines[0],
+		Playlist: playlist,
+	}, nil
 }
