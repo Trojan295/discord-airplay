@@ -1,12 +1,20 @@
 package main
 
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/Trojan295/discord-airplay/pkg/sources"
+)
+
 func main() {
-	//token := os.Getenv("AIR_OPENAITOKEN")
+	token := os.Getenv("AIR_OPENAITOKEN")
 
-	//dj := sources.NewChatGPTPlaylistGenerator(token)
+	dj := sources.NewChatGPTPlaylistGenerator(token)
 
-	//description := os.Args[1]
-	//songs, err := dj.GeneratePlaylist(context.Background(), description)
+	description := os.Args[1]
+	songs, err := dj.GeneratePlaylist(context.Background(), description)
 
-	//fmt.Println(songs, err)
+	fmt.Println(songs, err)
 }
