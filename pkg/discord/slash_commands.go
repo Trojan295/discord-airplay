@@ -157,6 +157,12 @@ func (ch *SlashCommandRouter) GetSlashCommands() []*discordgo.ApplicationCommand
 							Description: "Description of the playlist",
 							Required:    true,
 						},
+						{
+							Type:        discordgo.ApplicationCommandOptionInteger,
+							Name:        "length",
+							Description: "Number of songs",
+							Required:    false,
+						},
 					},
 				},
 			},

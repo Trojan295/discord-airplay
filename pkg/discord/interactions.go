@@ -19,7 +19,7 @@ type SongLookuper interface {
 }
 
 type PlaylistGenerator interface {
-	GeneratePlaylist(ctx context.Context, input string) (*sources.PlaylistResponse, error)
+	GeneratePlaylist(ctx context.Context, params *sources.PlaylistParams) (*sources.PlaylistResponse, error)
 }
 
 type InteractionStorage interface {
@@ -193,6 +193,7 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 	}
 
 	description := optionMap["description"].StringValue()
+	length := optionMap["length"].IntValue()
 
 	var voiceState *discordgo.VoiceState
 
@@ -209,7 +210,10 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 	}
 
 	go func() {
-		playlist, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, description)
+		playlist, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, &sources.PlaylistParams{
+			Description: description,
+			Length:      int(length),
+		})
 		if err != nil {
 			logger.Info("failed to generate playlist", zap.Error(err))
 			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{

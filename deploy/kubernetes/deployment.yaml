@@ -23,8 +23,7 @@ spec:
               value: ${AIR_DISCORDTOKEN}
             - name: AIR_OPENAITOKEN
               value: ${AIR_OPENAITOKEN}
-          image: trojan295/airplay
-          imagePullPolicy: Always
+          image: ghcr.io/trojan295/discord-airplay:latest
           name: airplay
           resources:
             requests:

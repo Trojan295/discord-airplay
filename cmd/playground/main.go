@@ -14,7 +14,10 @@ func main() {
 	dj := sources.NewChatGPTPlaylistGenerator(token)
 
 	description := os.Args[1]
-	songs, err := dj.GeneratePlaylist(context.Background(), description)
+	songs, err := dj.GeneratePlaylist(context.Background(), &sources.PlaylistParams{
+		Description: description,
+		Length:      5,
+	})
 
 	fmt.Println(songs, err)
 }
