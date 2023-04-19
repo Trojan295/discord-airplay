@@ -31,7 +31,7 @@ func (s *InmemoryPlaylistStorage) RemoveSong(position int) (bot.Song, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if index > len(s.songs) || index < 0 {
+	if index >= len(s.songs) || index < 0 {
 		return nil, nil
 	}
 
