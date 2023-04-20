@@ -27,6 +27,7 @@ type SongMetadata struct {
 	Duration time.Duration
 }
 
+// TODO: it must be possible to marshal song and store in database
 type Song interface {
 	GetHumanName() string
 	GetMetadata() *SongMetadata
@@ -65,6 +66,10 @@ type GuildPlayer struct {
 
 	logger *zap.Logger
 }
+
+var (
+	ErrRemoveInvalidPosition = errors.New("invalid position")
+)
 
 func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, playlistStore PlaylistStore) *GuildPlayer {
 	return &GuildPlayer{

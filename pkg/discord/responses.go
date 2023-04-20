@@ -17,7 +17,7 @@ func InteractionRespondServerError(logger *zap.Logger, s *discordgo.Session, i *
 	InteractionRespond(logger, s, i, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: "airplay has some problems...",
+			Content: "Airplay has some problems...",
 		},
 	})
 }

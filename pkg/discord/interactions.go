@@ -2,11 +2,12 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
-	"github.com/Trojan295/discord-airplay/pkg/bot/store"
+	"github.com/Trojan295/discord-airplay/pkg/config"
 	"github.com/Trojan295/discord-airplay/pkg/sources"
 	"github.com/bwmarrin/discordgo"
 	"go.uber.org/zap"
@@ -38,10 +39,12 @@ type InteractionHandler struct {
 	songLookuper      SongLookuper
 	storage           InteractionStorage
 
+	cfg *config.Config // TODO: replace with a playlist store, which supports multiple guilds
+
 	logger *zap.Logger
 }
 
-func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage InteractionStorage) *InteractionHandler {
+func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage InteractionStorage, cfg *config.Config) *InteractionHandler {
 	handler := &InteractionHandler{
 		ctx:               ctx,
 		discordToken:      discordToken,
@@ -49,6 +52,7 @@ func NewInteractionHandler(ctx context.Context, discordToken string, songLookupe
 		playlistGenerator: playlistGenerator,
 		songLookuper:      songLookuper,
 		storage:           storage,
+		cfg:               cfg,
 		logger:            zap.NewNop(),
 	}
 
@@ -403,6 +407,12 @@ func (handler *InteractionHandler) RemoveSong(s *discordgo.Session, ic *discordg
 
 	song, err := player.RemoveSong(int(position))
 	if err != nil {
+		if errors.Is(err, bot.ErrRemoveInvalidPosition) {
+			InteractionRespondMessage(handler.logger, s, ic.Interaction, "🤷🏽 Invalid position")
+			return
+		}
+
+		handler.logger.Error("failed to remove song", zap.Error(err))
 		InteractionRespondServerError(handler.logger, s, ic.Interaction)
 		return
 	}
@@ -447,7 +457,7 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 		guildID:        string(guildID),
 	}
 
-	playlistStore := store.NewInmemoryPlaylistStorage()
+	playlistStore := config.GetPlaylistStore(handler.cfg, string(guildID))
 
 	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
