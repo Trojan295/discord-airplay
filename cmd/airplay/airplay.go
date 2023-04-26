@@ -29,7 +29,6 @@ var (
 	storage *discord.InMemoryInteractionStorage
 )
 
-// TODO: store state in etcd
 func main() {
 	loggerCfg := zap.NewProductionConfig()
 	if os.Getenv("AIR_DEBUG") == "1" {
@@ -50,7 +49,7 @@ func main() {
 	youtubeFetcher = sources.NewYoutubeFetcher()
 	playlistGenerator := sources.NewChatGPTPlaylistGenerator(cfg.OpenAIToken)
 
-	handler := discord.NewInteractionHandler(ctx, cfg.DiscordToken, youtubeFetcher, playlistGenerator, storage).WithLogger(logger.Named("interactionHandler"))
+	handler := discord.NewInteractionHandler(ctx, cfg.DiscordToken, youtubeFetcher, playlistGenerator, storage, cfg).WithLogger(logger.Named("interactionHandler"))
 	commandHandler := discord.NewSlashCommandRouter(cfg.CommandPrefix).
 		PlayHandler(handler.PlaySong).
 		SkipHandler(handler.SkipSong).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Trojan295/discord-airplay/pkg/codec"
 	"github.com/bwmarrin/discordgo"
@@ -52,12 +53,12 @@ func (session *DiscordVoiceChatSession) LeaveVoiceChannel() error {
 	return nil
 }
 
-func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, reader io.Reader) error {
+func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, reader io.Reader, positionCallback func(time.Duration)) error {
 	if err := session.voiceConnection.Speaking(true); err != nil {
 		return fmt.Errorf("while starting to speak: %w", err)
 	}
 
-	if err := codec.StreamDCAData(ctx, reader, session.voiceConnection.OpusSend); err != nil {
+	if err := codec.StreamDCAData(ctx, reader, session.voiceConnection.OpusSend, positionCallback); err != nil {
 		return fmt.Errorf("while streaming DCA data: %w", err)
 	}
 
