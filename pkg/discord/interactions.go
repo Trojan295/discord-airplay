@@ -16,7 +16,7 @@ import (
 type GuildID string
 
 type SongLookuper interface {
-	LookupSongs(ctx context.Context, input string) ([]bot.Song, error)
+	LookupSongs(ctx context.Context, input string) ([]*bot.Song, error)
 }
 
 type PlaylistGenerator interface {
@@ -24,8 +24,8 @@ type PlaylistGenerator interface {
 }
 
 type InteractionStorage interface {
-	SaveSongList(channelID string, list []bot.Song)
-	GetSongList(channelID string) []bot.Song
+	SaveSongList(channelID string, list []*bot.Song)
+	GetSongList(channelID string) []*bot.Song
 	DeleteSongList(channelID string)
 }
 
@@ -143,9 +143,15 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 
 				if len(songs) == 1 {
 					song := songs[0]
-					metadata := song.GetMetadata()
+					metadata := song
 
-					player.AddSong(&ic.ChannelID, &vs.ChannelID, song)
+					if err := player.AddSong(&ic.ChannelID, &vs.ChannelID, song); err != nil {
+						logger.Info("failed to add song", zap.Error(err), zap.String("input", input))
+						FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+							Content: "😨 Failed to add song",
+						})
+						return
+					}
 
 					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
 						Content: fmt.Sprintf("➕ Added **%s** (%s) - %s to playlist", metadata.Title, metadata.Duration, metadata.URL),
@@ -242,9 +248,12 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 			}
 
 			song := songs[0]
-			player.AddSong(&ic.ChannelID, &voiceState.ChannelID, song)
+			if err := player.AddSong(&ic.ChannelID, &voiceState.ChannelID, song); err != nil {
+				logger.Info("failed to add song", zap.Error(err), zap.String("input", input))
+				continue
+			}
 
-			resposeMessage.WriteString(fmt.Sprintf("- %s (%s)\n", song.GetMetadata().Title, song.GetMetadata().Duration))
+			resposeMessage.WriteString(fmt.Sprintf("- %s (%s)\n", song.Title, song.Duration))
 		}
 
 		FollowupMessageCreate(logger, s, ic.Interaction, &discordgo.WebhookParams{
@@ -303,14 +312,19 @@ func (handler *InteractionHandler) AddSongOrPlaylist(s *discordgo.Session, ic *d
 	switch value {
 	case "playlist":
 		for _, song := range songs {
-			player.AddSong(&ic.Message.ChannelID, voiceChannelID, song)
+			if err := player.AddSong(&ic.Message.ChannelID, voiceChannelID, song); err != nil {
+				handler.logger.Info("failed to add song", zap.Error(err), zap.String("input", song.URL))
+			}
 		}
 		InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("➕ Added %d songs to playlist", len(songs)))
 	default:
 		song := songs[0]
-		metadata := song.GetMetadata()
-		player.AddSong(&ic.Message.ChannelID, voiceChannelID, song)
-		InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("➕ Added **%s** - %s to playlist", metadata.Title, metadata.URL))
+		if err := player.AddSong(&ic.Message.ChannelID, voiceChannelID, song); err != nil {
+			handler.logger.Info("failed to add song", zap.Error(err), zap.String("input", song.URL))
+			InteractionRespondMessage(handler.logger, s, ic.Interaction, "😨 Failed to add song")
+		} else {
+			InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("➕ Added **%s** - %s to playlist", song.Title, song.URL))
+		}
 	}
 
 	handler.storage.DeleteSongList(ic.ChannelID)
@@ -325,7 +339,11 @@ func (handler *InteractionHandler) StopPlaying(s *discordgo.Session, ic *discord
 	}
 
 	player := handler.getGuildPlayer(GuildID(g.ID))
-	player.Stop()
+	if err := player.Stop(); err != nil {
+		handler.logger.Info("failed to stop playing", zap.Error(err))
+		InteractionRespondServerError(handler.logger, s, ic.Interaction)
+		return
+	}
 
 	InteractionRespondMessage(handler.logger, s, ic.Interaction, "⏹️ Stopped playing!")
 }
@@ -430,7 +448,13 @@ func (handler *InteractionHandler) GetPlayingSong(s *discordgo.Session, ic *disc
 
 	player := handler.getGuildPlayer(GuildID(g.ID))
 
-	song := player.GetPlayedSong()
+	song, err := player.GetPlayedSong()
+	if err != nil {
+		handler.logger.Info("failed to played song", zap.Error(err))
+		InteractionRespondServerError(handler.logger, s, ic.Interaction)
+		return
+	}
+
 	if song == nil {
 		InteractionRespondMessage(handler.logger, s, ic.Interaction, "🔇 No song is being played right now...")
 		return
@@ -459,7 +483,7 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 
 	playlistStore := config.GetPlaylistStore(handler.cfg, string(guildID))
 
-	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
+	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore, sources.GetDCAData).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
 }
 

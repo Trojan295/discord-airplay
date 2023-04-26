@@ -19,7 +19,9 @@ type Trigger struct {
 	TextChannelID  *string
 }
 
-type SongMetadata struct {
+type Song struct {
+	Type string
+
 	Title    string
 	URL      string
 	Playable bool
@@ -27,11 +29,12 @@ type SongMetadata struct {
 	Duration time.Duration
 }
 
-// TODO: it must be possible to marshal song and store in database
-type Song interface {
-	GetHumanName() string
-	GetMetadata() *SongMetadata
-	GetDCAData(ctx context.Context) (io.Reader, error)
+func (s *Song) GetHumanName() string {
+	if s.Title != "" {
+		return s.Title
+	}
+
+	return s.URL
 }
 
 type VoiceChatSession interface {
@@ -39,29 +42,44 @@ type VoiceChatSession interface {
 	SendMessage(channelID string, message string) error
 	JoinVoiceChannel(channelID string) error
 	LeaveVoiceChannel() error
-	SendAudio(ctx context.Context, r io.Reader) error
+	SendAudio(ctx context.Context, r io.Reader, positionCallback func(time.Duration)) error
 }
 
-type PlaylistStore interface {
-	AppendSong(Song) error
-	RemoveSong(int) (Song, error)
+type DCADataGetter func(ctx context.Context, song *Song) (io.Reader, error)
+
+type PlayedSong struct {
+	Song
+	Position time.Duration
+}
+
+type GuildPlayerState interface {
+	AppendSong(*Song) error
+	RemoveSong(int) (*Song, error)
 	ClearPlaylist() error
-	GetSongs() ([]Song, error)
-	PopFirstSong() (Song, error)
+	GetSongs() ([]*Song, error)
+	PopFirstSong() (*Song, error)
+
+	SetVoiceChannel(string) error
+	GetVoiceChannel() (string, error)
+
+	SetTextChannel(string) error
+	GetTextChannel() (string, error)
+
+	GetCurrentSong() (*PlayedSong, error)
+	SetCurrentSong(*PlayedSong) error
 }
 
 type GuildPlayer struct {
 	session VoiceChatSession
 
+	state GuildPlayerState
+
 	ctx context.Context
 
-	triggerCh      chan Trigger
-	voiceChannelID string
-	textChannelID  string
-	playlistStore  PlaylistStore
-	playedSong     Song
-	songCtxCancel  context.CancelFunc
+	triggerCh     chan Trigger
+	songCtxCancel context.CancelFunc
 
+	dCADataGetter   DCADataGetter
 	audioBufferSize int
 
 	logger *zap.Logger
@@ -71,14 +89,15 @@ var (
 	ErrRemoveInvalidPosition = errors.New("invalid position")
 )
 
-func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, playlistStore PlaylistStore) *GuildPlayer {
+func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, state GuildPlayerState, dCADataGetter DCADataGetter) *GuildPlayer {
 	return &GuildPlayer{
+		// TODO: persist guild player state
 		ctx:             ctx,
+		state:           state,
 		session:         session,
 		triggerCh:       make(chan Trigger),
-		playlistStore:   playlistStore,
-		playedSong:      nil,
 		logger:          zap.NewNop(),
+		dCADataGetter:   dCADataGetter,
 		audioBufferSize: 1024 * 1024, // 1 MiB
 	}
 }
@@ -94,13 +113,21 @@ func (p *GuildPlayer) Close() error {
 }
 
 func (p *GuildPlayer) SendMessage(message string) {
-	if err := p.session.SendMessage(p.textChannelID, message); err != nil {
+	channel, err := p.state.GetTextChannel()
+	if err != nil {
+		p.logger.Error("failed to get text channel", zap.Error(err))
+		return
+	}
+
+	if err := p.session.SendMessage(channel, message); err != nil {
 		p.logger.Error("failed to send message", zap.Error(err))
 	}
 }
 
-func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
-	p.playlistStore.AppendSong(s)
+func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s *Song) error {
+	if err := p.state.AppendSong(s); err != nil {
+		return fmt.Errorf("while appending song: %w", err)
+	}
 
 	go func() {
 		p.triggerCh <- Trigger{
@@ -109,6 +136,8 @@ func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s Song) {
 			TextChannelID:  textChannelID,
 		}
 	}()
+
+	return nil
 }
 
 func (p *GuildPlayer) SkipSong() {
@@ -117,16 +146,20 @@ func (p *GuildPlayer) SkipSong() {
 	}
 }
 
-func (p *GuildPlayer) Stop() {
-	p.playlistStore.ClearPlaylist()
+func (p *GuildPlayer) Stop() error {
+	if err := p.state.ClearPlaylist(); err != nil {
+		return fmt.Errorf("while clearing playlist: %w", err)
+	}
 
 	if p.songCtxCancel != nil {
 		p.songCtxCancel()
 	}
+
+	return nil
 }
 
-func (p *GuildPlayer) RemoveSong(position int) (Song, error) {
-	song, err := p.playlistStore.RemoveSong(position)
+func (p *GuildPlayer) RemoveSong(position int) (*Song, error) {
+	song, err := p.state.RemoveSong(position)
 	if err != nil {
 		return nil, fmt.Errorf("while removing song: %w", err)
 	}
@@ -135,7 +168,7 @@ func (p *GuildPlayer) RemoveSong(position int) (Song, error) {
 }
 
 func (p *GuildPlayer) GetPlaylist() ([]string, error) {
-	songs, err := p.playlistStore.GetSongs()
+	songs, err := p.state.GetSongs()
 	if err != nil {
 		return nil, fmt.Errorf("while getting songs: %w", err)
 	}
@@ -148,8 +181,8 @@ func (p *GuildPlayer) GetPlaylist() ([]string, error) {
 	return playlist, err
 }
 
-func (p *GuildPlayer) GetPlayedSong() Song {
-	return p.playedSong
+func (p *GuildPlayer) GetPlayedSong() (*PlayedSong, error) {
+	return p.state.GetCurrentSong()
 }
 
 func (p *GuildPlayer) JoinVoiceChannel(channelID, textChannelID string) {
@@ -167,6 +200,30 @@ func (p *GuildPlayer) LeaveVoiceChannel() {
 }
 
 func (p *GuildPlayer) Run(ctx context.Context) error {
+	songs, err := p.state.GetSongs()
+	if err != nil {
+		return fmt.Errorf("while getting current song: %w", err)
+	}
+
+	if len(songs) > 0 {
+		voiceChannel, err := p.state.GetVoiceChannel()
+		if err != nil {
+			return fmt.Errorf("while getting voice channel: %w", err)
+		}
+		textChannel, err := p.state.GetTextChannel()
+		if err != nil {
+			return fmt.Errorf("while getting text channel: %w", err)
+		}
+
+		go func() {
+			p.triggerCh <- Trigger{
+				Command:        "play",
+				VoiceChannelID: &voiceChannel,
+				TextChannelID:  &textChannel,
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -175,13 +232,17 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 			switch trigger.Command {
 			case "play":
 				if trigger.TextChannelID != nil {
-					p.textChannelID = *trigger.TextChannelID
+					if err := p.state.SetTextChannel(*trigger.TextChannelID); err != nil {
+						return fmt.Errorf("while setting text channel: %w", err)
+					}
 				}
 				if trigger.VoiceChannelID != nil {
-					p.voiceChannelID = *trigger.VoiceChannelID
+					if err := p.state.SetVoiceChannel(*trigger.VoiceChannelID); err != nil {
+						return fmt.Errorf("while setting voice channel: %w", err)
+					}
 				}
 
-				songs, err := p.playlistStore.GetSongs()
+				songs, err := p.state.GetSongs()
 				if err != nil {
 					p.logger.Error("failed to get songs", zap.Error(err))
 					continue
@@ -200,20 +261,30 @@ func (p *GuildPlayer) Run(ctx context.Context) error {
 }
 
 func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
-	p.logger.Debug("joining voice channel", zap.String("channel", p.voiceChannelID))
-	if err := p.session.JoinVoiceChannel(p.voiceChannelID); err != nil {
+	voiceChannel, err := p.state.GetVoiceChannel()
+	if err != nil {
+		return fmt.Errorf("while getting voice channel: %w", err)
+	}
+
+	textChannel, err := p.state.GetTextChannel()
+	if err != nil {
+		return fmt.Errorf("while getting text channel: %w", err)
+	}
+
+	p.logger.Debug("joining voice channel", zap.String("channel", voiceChannel))
+	if err := p.session.JoinVoiceChannel(voiceChannel); err != nil {
 		return fmt.Errorf("failed to join voice channel: %w", err)
 	}
 
 	defer func() {
-		p.logger.Debug("leaving voice channel", zap.String("channel", p.voiceChannelID))
+		p.logger.Debug("leaving voice channel", zap.String("channel", voiceChannel))
 		if err := p.session.LeaveVoiceChannel(); err != nil {
 			p.logger.Error("failed to leave voice channel", zap.Error(err))
 		}
 	}()
 
 	for {
-		song, err := p.playlistStore.PopFirstSong()
+		song, err := p.state.PopFirstSong()
 		if err == ErrNoSongs {
 			p.logger.Debug("playlist is empty")
 			break
@@ -222,30 +293,38 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while poping first song: %w", err)
 		}
 
+		if err := p.state.SetCurrentSong(&PlayedSong{Song: *song}); err != nil {
+			return fmt.Errorf("while setting current song: %w", err)
+		}
+
 		var songCtx context.Context
 		songCtx, p.songCtxCancel = context.WithCancel(ctx)
 
-		metadata := song.GetMetadata()
-		message := fmt.Sprintf("▶️ Playing song **%s** - %s", metadata.Title, metadata.URL)
+		logger := p.logger.With(zap.String("title", song.Title), zap.String("url", song.URL))
 
-		logger := p.logger.With(zap.String("title", metadata.Title), zap.String("url", metadata.URL))
-
-		if err := p.session.SendMessage(p.textChannelID, message); err != nil {
+		message := fmt.Sprintf("▶️ Playing song **%s** - %s", song.Title, song.URL)
+		if err := p.session.SendMessage(textChannel, message); err != nil {
 			return fmt.Errorf("while sending message with song name: %w", err)
 		}
 
-		dcaData, err := song.GetDCAData(songCtx)
+		dcaData, err := p.dCADataGetter(songCtx, song)
 		if err != nil {
 			return fmt.Errorf("while getting DCA data from song %v: %w", song, err)
 		}
 
 		audioReader := bufio.NewReaderSize(dcaData, p.audioBufferSize)
 		logger.Debug("sending audio stream")
-		if err := p.session.SendAudio(songCtx, audioReader); err != nil {
+		if err := p.session.SendAudio(songCtx, audioReader, func(d time.Duration) {
+			if err := p.state.SetCurrentSong(&PlayedSong{Song: *song, Position: d}); err != nil {
+				logger.Error("failed to set current song position", zap.Error(err))
+			}
+		}); err != nil {
 			return fmt.Errorf("while sending audio data: %w", err)
 		}
 
-		p.playedSong = nil
+		if err := p.state.SetCurrentSong(nil); err != nil {
+			return fmt.Errorf("while setting current song: %w", err)
+		}
 		logger.Debug("stopped playing")
 
 		time.Sleep(250 * time.Millisecond)

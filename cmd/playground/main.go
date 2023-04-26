@@ -1,23 +1,28 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
-	"os"
-
-	"github.com/Trojan295/discord-airplay/pkg/sources"
 )
 
+type song interface {
+	GetTitle() string
+}
+
+type isong struct {
+	Title string `json:"title"`
+}
+
+func (s *isong) GetTitle() string {
+	return s.Title
+}
+
 func main() {
-	token := os.Getenv("AIR_OPENAITOKEN")
+	songs := []song{
+		&isong{Title: "song1"},
+		&isong{Title: "song2"},
+	}
 
-	dj := sources.NewChatGPTPlaylistGenerator(token)
-
-	description := os.Args[1]
-	songs, err := dj.GeneratePlaylist(context.Background(), &sources.PlaylistParams{
-		Description: description,
-		Length:      5,
-	})
-
-	fmt.Println(songs, err)
+	data, err := json.Marshal(songs)
+	fmt.Println(string(data), err)
 }

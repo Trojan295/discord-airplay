@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -27,12 +26,10 @@ type FileStoreConfig struct {
 	Dir string `default:"./playlist"`
 }
 
-func GetPlaylistStore(cfg *Config, guildID string) bot.PlaylistStore {
-	fmt.Println("GetPlaylistStore: ", cfg.Store.Type)
-
+func GetPlaylistStore(cfg *Config, guildID string) bot.GuildPlayerState {
 	switch cfg.Store.Type {
 	case "memory":
-		return store.NewInmemoryPlaylistStorage()
+		return store.NewInmemoryGuildPlayerState()
 	case "file":
 		if err := os.MkdirAll(cfg.Store.File.Dir, 0755); err != nil {
 			panic(err)

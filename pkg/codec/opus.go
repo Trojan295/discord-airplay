@@ -5,12 +5,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 )
 
-func StreamDCAData(ctx context.Context, dca io.Reader, opusChan chan<- []byte) error {
+const (
+	frameLength = time.Duration(20) * time.Millisecond
+)
+
+func StreamDCAData(ctx context.Context, dca io.Reader, opusChan chan<- []byte, positionCallback func(position time.Duration)) error {
 	var opuslen int16
+	framesSent := 0
 
 	for {
+
 		// Read opus frame length from dca file.
 		err := binary.Read(dca, binary.LittleEndian, &opuslen)
 
@@ -37,6 +44,12 @@ func StreamDCAData(ctx context.Context, dca io.Reader, opusChan chan<- []byte) e
 		case <-ctx.Done():
 			return nil
 		case opusChan <- inBuf:
+			framesSent += 1
+			go func() {
+				if positionCallback != nil && framesSent%50 == 0 {
+					positionCallback(time.Duration(framesSent) * frameLength)
+				}
+			}()
 			continue
 		}
 	}
