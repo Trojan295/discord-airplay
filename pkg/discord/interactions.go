@@ -203,7 +203,12 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 	}
 
 	description := optionMap["description"].StringValue()
-	length := optionMap["length"].IntValue()
+
+	var length int64 = 10
+	lengthOpt, ok := optionMap["length"]
+	if ok {
+		length = lengthOpt.IntValue()
+	}
 
 	var voiceState *discordgo.VoiceState
 

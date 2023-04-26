@@ -68,6 +68,13 @@ func (s *InmemoryPlaylistStorage) SetTextChannel(channelID string) error {
 	return nil
 }
 
+func (s *InmemoryPlaylistStorage) PrependSong(song *bot.Song) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.songs = append([]*bot.Song{song}, s.songs...)
+	return nil
+}
+
 func (s *InmemoryPlaylistStorage) AppendSong(song *bot.Song) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

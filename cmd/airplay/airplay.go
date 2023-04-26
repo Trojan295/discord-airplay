@@ -29,7 +29,6 @@ var (
 	storage *discord.InMemoryInteractionStorage
 )
 
-// TODO: store state in etcd
 func main() {
 	loggerCfg := zap.NewProductionConfig()
 	if os.Getenv("AIR_DEBUG") == "1" {

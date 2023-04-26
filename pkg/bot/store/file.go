@@ -124,6 +124,24 @@ func (s *FilePlaylistStorage) SetTextChannel(channelID string) error {
 	return nil
 }
 
+func (s *FilePlaylistStorage) PrependSong(song *bot.Song) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return fmt.Errorf("failed to read state: %w", err)
+	}
+
+	state.Songs = append([]*bot.Song{song}, state.Songs...)
+
+	if err := s.writeState(state); err != nil {
+		return fmt.Errorf("failed to write state: %w", err)
+	}
+
+	return nil
+}
+
 func (s *FilePlaylistStorage) AppendSong(song *bot.Song) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

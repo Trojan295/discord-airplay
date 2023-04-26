@@ -26,7 +26,8 @@ type Song struct {
 	URL      string
 	Playable bool
 
-	Duration time.Duration
+	Duration      time.Duration
+	StartPosition time.Duration
 }
 
 func (s *Song) GetHumanName() string {
@@ -53,6 +54,7 @@ type PlayedSong struct {
 }
 
 type GuildPlayerState interface {
+	PrependSong(*Song) error
 	AppendSong(*Song) error
 	RemoveSong(int) (*Song, error)
 	ClearPlaylist() error
@@ -91,7 +93,6 @@ var (
 
 func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, state GuildPlayerState, dCADataGetter DCADataGetter) *GuildPlayer {
 	return &GuildPlayer{
-		// TODO: persist guild player state
 		ctx:             ctx,
 		state:           state,
 		session:         session,
@@ -200,9 +201,20 @@ func (p *GuildPlayer) LeaveVoiceChannel() {
 }
 
 func (p *GuildPlayer) Run(ctx context.Context) error {
+	currentSong, err := p.state.GetCurrentSong()
+	if err != nil {
+		p.logger.Info("failed to get current song", zap.Error(err))
+	} else if currentSong != nil {
+		currentSong.StartPosition += currentSong.Position
+
+		if err := p.state.PrependSong(&currentSong.Song); err != nil {
+			p.logger.Info("failed to prepend current song in the playlist", zap.Error(err))
+		}
+	}
+
 	songs, err := p.state.GetSongs()
 	if err != nil {
-		return fmt.Errorf("while getting current song: %w", err)
+		return fmt.Errorf("while getting songs: %w", err)
 	}
 
 	if len(songs) > 0 {

@@ -77,7 +77,11 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Rea
 		ytArgs := s.getYTdlpGetDataArgs(song)
 		ytCmd := strings.Join(append([]string{"yt-dlp"}, ytArgs...), " ")
 
-		dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("%s | ffmpeg -i pipe: -f s16le -ar 48000 -ac 2 pipe:1 | dca", ytCmd))
+		seekArg := ""
+		if song.StartPosition > 0 {
+			seekArg = fmt.Sprintf("-ss %d", int64(song.StartPosition.Seconds()))
+		}
+		dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("%s | ffmpeg -i pipe: %s -f s16le -ar 48000 -ac 2 pipe:1 | dca", ytCmd, seekArg))
 
 		bw := bufio.NewWriterSize(writer, downloadBuffer)
 		dcaCmd.Stdout = bw
