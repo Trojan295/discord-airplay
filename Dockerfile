@@ -15,7 +15,7 @@ RUN CGO_ENABLED=1 GOARCH=amd64 go build -o /bin/airplay cmd/airplay/airplay.go
 
 FROM ubuntu
 
-ARG YT_DLP_VERSION="2023.03.04"
+ARG YT_DLP_VERSION="2023.07.06"
 
 RUN apt-get update \
   && apt-get install -y ffmpeg wget libopusfile0 \

@@ -27,7 +27,7 @@ func NewYoutubeFetcher() *YoutubeFetcher {
 }
 
 func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]*bot.Song, error) {
-	args := []string{"--print", "title,original_url,is_live,duration", "--flat-playlist"}
+	args := []string{"--print", "title,original_url,is_live,duration", "--flat-playlist", "-U"}
 
 	if strings.HasPrefix(input, "https://") {
 		args = append(args, input)

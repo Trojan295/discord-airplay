@@ -1,28 +1,29 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"context"
+	"io"
+	"os"
+
+	"github.com/Trojan295/discord-airplay/pkg/sources"
 )
 
-type song interface {
-	GetTitle() string
-}
-
-type isong struct {
-	Title string `json:"title"`
-}
-
-func (s *isong) GetTitle() string {
-	return s.Title
-}
-
 func main() {
-	songs := []song{
-		&isong{Title: "song1"},
-		&isong{Title: "song2"},
+	ctx := context.Background()
+
+	ytFetcher := sources.NewYoutubeFetcher()
+	songs, err := ytFetcher.LookupSongs(ctx, "muncipal waste")
+	if err != nil {
+		panic(err)
 	}
 
-	data, err := json.Marshal(songs)
-	fmt.Println(string(data), err)
+	reader, err := ytFetcher.GetDCAData(ctx, songs[0])
+	if err != nil {
+		panic(err)
+	}
+
+	_, err = io.Copy(os.Stdout, reader)
+	if err != nil {
+		panic(err)
+	}
 }
