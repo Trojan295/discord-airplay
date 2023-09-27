@@ -74,19 +74,23 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Rea
 	go func(w io.WriteCloser) {
 		defer w.Close()
 
-		ytArgs := s.getYTdlpGetDataArgs(song)
-		ytCmd := strings.Join(append([]string{"yt-dlp"}, ytArgs...), " ")
+		ytArgs := []string{"-x", "-o", "-", "--force-overwrites", "'" + song.URL + "'"}
 
-		seekArg := ""
+		ffmpegArgs := []string{"-i", "pipe:0"}
 		if song.StartPosition > 0 {
-			seekArg = fmt.Sprintf("-ss %d", int64(song.StartPosition.Seconds()))
+			ffmpegArgs = append(ffmpegArgs, "-ss", song.StartPosition.String())
 		}
-		dcaCmd := exec.CommandContext(ctx, "sh", "-c", fmt.Sprintf("%s | ffmpeg -i pipe: %s -f s16le -ar 48000 -ac 2 pipe:1 | dca", ytCmd, seekArg))
+		ffmpegArgs = append(ffmpegArgs, "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
+
+		downloadCmd := exec.CommandContext(ctx,
+			"sh", "-c", fmt.Sprintf("yt-dlp %s | ffmpeg %s | dca",
+				strings.Join(ytArgs, " "),
+				strings.Join(ffmpegArgs, " ")))
 
 		bw := bufio.NewWriterSize(writer, downloadBuffer)
-		dcaCmd.Stdout = bw
+		downloadCmd.Stdout = bw
 
-		if err := dcaCmd.Run(); err != nil {
+		if err := downloadCmd.Run(); err != nil {
 			log.Printf("while executing get DCA data pipe: %v", err)
 		}
 
@@ -96,8 +100,4 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Rea
 	}(writer)
 
 	return reader, nil
-}
-
-func (s *YoutubeFetcher) getYTdlpGetDataArgs(song *bot.Song) []string {
-	return []string{"-x", "-o", "-", "--force-overwrites", song.URL}
 }
