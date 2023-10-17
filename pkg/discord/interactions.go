@@ -210,6 +210,11 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 		length = lengthOpt.IntValue()
 	}
 
+	if length > 20 {
+		InteractionRespondMessage(handler.logger, s, ic.Interaction, "😨 You cannot request a playlist longer than 20 songs.")
+		return
+	}
+
 	var voiceState *discordgo.VoiceState
 
 	for _, vs := range g.VoiceStates {

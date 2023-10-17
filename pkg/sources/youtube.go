@@ -19,8 +19,7 @@ const (
 	downloadBuffer = 100 * 1024 // 100 KiB
 )
 
-type YoutubeFetcher struct {
-}
+type YoutubeFetcher struct{}
 
 func NewYoutubeFetcher() *YoutubeFetcher {
 	return &YoutubeFetcher{}
@@ -74,7 +73,7 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Rea
 	go func(w io.WriteCloser) {
 		defer w.Close()
 
-		ytArgs := []string{"-x", "-o", "-", "--force-overwrites", "'" + song.URL + "'"}
+		ytArgs := []string{"-U", "-x", "-o", "-", "--force-overwrites", "--http-chunk-size", "100K", "'" + song.URL + "'"}
 
 		ffmpegArgs := []string{"-i", "pipe:0"}
 		if song.StartPosition > 0 {

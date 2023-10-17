@@ -7,15 +7,18 @@ import (
 	"strings"
 
 	"github.com/sashabaranov/go-openai"
+	"golang.org/x/exp/slog"
 )
 
 type ChatGPTPlaylistGenerator struct {
+	Logger       *slog.Logger
 	openAIClient *openai.Client
 }
 
 func NewChatGPTPlaylistGenerator(token string) *ChatGPTPlaylistGenerator {
 	client := openai.NewClient(token)
 	return &ChatGPTPlaylistGenerator{
+		Logger:       slog.Default(),
 		openAIClient: client,
 	}
 }
@@ -58,6 +61,8 @@ func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, params 
 	if err != nil {
 		return nil, fmt.Errorf("while creating chat completion: %w", err)
 	}
+
+	g.Logger.Debug("chat completion completed", "respose", resp.Choices[0].Message.Content, "prompt tokens", resp.Usage.PromptTokens, "output tokens", resp.Usage.CompletionTokens)
 
 	lines := strings.Split(resp.Choices[0].Message.Content, "\n")
 
