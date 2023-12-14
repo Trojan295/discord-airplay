@@ -26,7 +26,10 @@ func NewYoutubeFetcher() *YoutubeFetcher {
 }
 
 func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]*bot.Song, error) {
-	args := []string{"--print", "title,original_url,is_live,duration", "--flat-playlist", "-U"}
+	ytDlpPrintColumns := []string{"title", "original_url", "is_live", "duration"}
+	printColumns := strings.Join(ytDlpPrintColumns, ",")
+
+	args := []string{"--print", printColumns, "--flat-playlist", "-U"}
 
 	if strings.HasPrefix(input, "https://") {
 		args = append(args, input)
@@ -43,18 +46,19 @@ func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]*bot.
 		return nil, fmt.Errorf("while executing yt-dlp command to get metadata: %w", err)
 	}
 
+	linesPerSong := len(ytDlpPrintColumns)
 	ytOutLines := strings.Split(ytOutBuf.String(), "\n")
-	songCount := len(ytOutLines) / 3
+	songCount := len(ytOutLines) / linesPerSong
 
 	songs := make([]*bot.Song, 0, songCount)
 	for i := 0; i < songCount; i++ {
-		duration, _ := strconv.ParseFloat(ytOutLines[4*i+3], 32)
+		duration, _ := strconv.ParseFloat(ytOutLines[linesPerSong*i+3], 32)
 
 		song := &bot.Song{
 			Type:     "yt-dlp",
-			Title:    ytOutLines[4*i],
-			URL:      ytOutLines[4*i+1],
-			Playable: ytOutLines[4*i+2] == "False" || ytOutLines[3*i+2] == "NA",
+			Title:    ytOutLines[linesPerSong*i],
+			URL:      ytOutLines[linesPerSong*i+1],
+			Playable: ytOutLines[linesPerSong*i+2] == "False" || ytOutLines[3*i+2] == "NA",
 			Duration: time.Second * time.Duration(duration),
 		}
 		if !song.Playable {
