@@ -154,7 +154,21 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 					}
 
 					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: fmt.Sprintf("➕ Added **%s** (%s) - %s to playlist", metadata.Title, metadata.Duration, metadata.URL),
+						Embeds: []*discordgo.MessageEmbed{
+							{
+								Title: "Added song",
+								Fields: []*discordgo.MessageEmbedField{
+									{
+										Name:  "Name",
+										Value: metadata.GetHumanName(),
+									},
+									{
+										Name:  "Duration",
+										Value: metadata.Duration.String(),
+									},
+								},
+							},
+						},
 					})
 				} else {
 					handler.storage.SaveSongList(ic.ChannelID, songs)
