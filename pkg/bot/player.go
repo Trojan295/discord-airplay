@@ -38,9 +38,16 @@ func (s *Song) GetHumanName() string {
 	return s.URL
 }
 
+type PlayMessage struct {
+	Song     *Song
+	Position time.Duration
+}
+
 type VoiceChatSession interface {
 	Close() error
-	SendMessage(channelID string, message string) error
+	SendMessage(channelID, message string) error
+	SendPlayMessage(channelID string, message *PlayMessage) (string, error)
+	EditPlayMessage(channelID, messageID string, message *PlayMessage) error
 	JoinVoiceChannel(channelID string) error
 	LeaveVoiceChannel() error
 	SendAudio(ctx context.Context, r io.Reader, positionCallback func(time.Duration)) error
@@ -314,8 +321,10 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 
 		logger := p.logger.With(zap.String("title", song.Title), zap.String("url", song.URL))
 
-		message := fmt.Sprintf("▶️ Playing song **%s** - %s", song.Title, song.URL)
-		if err := p.session.SendMessage(textChannel, message); err != nil {
+		playMsgID, err := p.session.SendPlayMessage(textChannel, &PlayMessage{
+			Song: song,
+		})
+		if err != nil {
 			return fmt.Errorf("while sending message with song name: %w", err)
 		}
 
@@ -330,6 +339,10 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			if err := p.state.SetCurrentSong(&PlayedSong{Song: *song, Position: d}); err != nil {
 				logger.Error("failed to set current song position", zap.Error(err))
 			}
+			if err := p.session.EditPlayMessage(textChannel, playMsgID, &PlayMessage{Song: song, Position: d}); err != nil {
+				logger.Error("failed to edit message", zap.Error(err))
+			}
+
 		}); err != nil {
 			return fmt.Errorf("while sending audio data: %w", err)
 		}
