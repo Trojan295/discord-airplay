@@ -9,6 +9,7 @@ import (
 	"github.com/Trojan295/discord-airplay/pkg/bot"
 	"github.com/Trojan295/discord-airplay/pkg/config"
 	"github.com/Trojan295/discord-airplay/pkg/sources"
+	"github.com/Trojan295/discord-airplay/pkg/utils"
 	"github.com/bwmarrin/discordgo"
 	"go.uber.org/zap"
 )
@@ -65,7 +66,7 @@ func (handler *InteractionHandler) WithLogger(l *zap.Logger) *InteractionHandler
 }
 
 func (handler *InteractionHandler) Ready(s *discordgo.Session, event *discordgo.Ready) {
-	if err := s.UpdateGameStatus(0, "🕺💃 /air"); err != nil {
+	if err := s.UpdateGameStatus(0, fmt.Sprintf("🕺💃 /%s", handler.cfg.CommandPrefix)); err != nil {
 		handler.logger.Error("failed to update game status", zap.Error(err))
 	}
 }
@@ -115,88 +116,77 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 
 	input := optionMap["input"].StringValue()
 
-	for _, vs := range g.VoiceStates {
-		if vs.UserID == ic.Member.User.ID {
-			InteractionRespond(handler.logger, s, ic.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "⏳ Adding song...",
-				},
-			})
-
-			go func() {
-				songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
-				if err != nil {
-					logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
-					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: "😨 Failed to add song",
-					})
-					return
-				}
-
-				if len(songs) == 0 {
-					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: "😨 Could not find any playable songs",
-					})
-					return
-				}
-
-				if len(songs) == 1 {
-					song := songs[0]
-					metadata := song
-
-					if err := player.AddSong(&ic.ChannelID, &vs.ChannelID, song); err != nil {
-						logger.Info("failed to add song", zap.Error(err), zap.String("input", input))
-						FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-							Content: "😨 Failed to add song",
-						})
-						return
-					}
-
-					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Embeds: []*discordgo.MessageEmbed{
-							{
-								Title: "Added song",
-								Fields: []*discordgo.MessageEmbedField{
-									{
-										Name:  "Name",
-										Value: metadata.GetHumanName(),
-									},
-									{
-										Name:  "Duration",
-										Value: metadata.Duration.String(),
-									},
-								},
-							},
-						},
-					})
-				} else {
-					handler.storage.SaveSongList(ic.ChannelID, songs)
-
-					FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-						Content: fmt.Sprintf("👀 The song is part of a playlist, which contains %d songs. What should I do?", len(songs)),
-						Components: []discordgo.MessageComponent{
-							discordgo.ActionsRow{
-								Components: []discordgo.MessageComponent{
-									discordgo.SelectMenu{
-										CustomID: "add_song_playlist",
-										Options: []discordgo.SelectMenuOption{
-											{Label: "Add song", Value: "song", Emoji: discordgo.ComponentEmoji{Name: "🎵"}},
-											{Label: "Add whole playlist", Value: "playlist", Emoji: discordgo.ComponentEmoji{Name: "🎶"}},
-										},
-									},
-								},
-							},
-						},
-					})
-				}
-			}()
-
-			return
-		}
+	vs := getUsersVoiceState(g, ic.Member.User)
+	if vs == nil {
+		InteractionRespondMessage(handler.logger, s, ic.Interaction, MessageUserNotInVoiceChannel)
 	}
 
-	InteractionRespondMessage(handler.logger, s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+	InteractionRespond(handler.logger, s, ic.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{GenerateAddingSongEmbed(input, ic.Member)},
+		},
+	})
+
+	go func(ic *discordgo.InteractionCreate, vs *discordgo.VoiceState) {
+		songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
+		if err != nil {
+			logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
+			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{GenerateFailedToAddSongEmbed(input, ic.Member)},
+			})
+			return
+		}
+
+		memberName := getMemberName(ic.Member)
+		for i := range songs {
+			songs[i].RequestedBy = &memberName
+		}
+
+		if len(songs) == 0 {
+			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{GenerateFailedToFindSong(input, ic.Member)},
+			})
+			return
+		}
+
+		if len(songs) == 1 {
+			song := songs[0]
+
+			if err := player.AddSong(&ic.ChannelID, &vs.ChannelID, song); err != nil {
+				logger.Info("failed to add song", zap.Error(err), zap.String("input", input))
+				FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+					Embeds: []*discordgo.MessageEmbed{GenerateFailedToAddSongEmbed(input, ic.Member)},
+				})
+				return
+			}
+
+			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{GenerateAddedSongEmbed(song, ic.Member)},
+			})
+			return
+		}
+
+		handler.storage.SaveSongList(ic.ChannelID, songs)
+
+		FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
+			Embeds: []*discordgo.MessageEmbed{GenerateAskAddPlaylistEmbed(songs, ic.Member)},
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.SelectMenu{
+							CustomID: "add_song_playlist",
+							Options: []discordgo.SelectMenuOption{
+								{Label: "Add song", Value: "song", Emoji: discordgo.ComponentEmoji{Name: "🎵"}},
+								{Label: "Add whole playlist", Value: "playlist", Emoji: discordgo.ComponentEmoji{Name: "🎶"}},
+							},
+						},
+					},
+				},
+			},
+		})
+
+	}(ic, vs)
 }
 
 func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *discordgo.InteractionCreate, opt *discordgo.ApplicationCommandInteractionDataOption) {
@@ -225,25 +215,17 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 	}
 
 	if length > 20 {
-		InteractionRespondMessage(handler.logger, s, ic.Interaction, "😨 You cannot request a playlist longer than 20 songs.")
+		InteractionRespondMessage(handler.logger, s, ic.Interaction, MessageTooLargePlaylist)
 		return
 	}
 
-	var voiceState *discordgo.VoiceState
-
-	for _, vs := range g.VoiceStates {
-		if vs.UserID == ic.Member.User.ID {
-			voiceState = vs
-			break
-		}
-	}
-
-	if voiceState == nil {
-		InteractionRespondMessage(handler.logger, s, ic.Interaction, "🤷🏽 You are not in a voice channel. Join a voice channel to play a song.")
+	vs := getUsersVoiceState(g, ic.Member.User)
+	if vs == nil {
+		InteractionRespondMessage(handler.logger, s, ic.Interaction, MessageUserNotInVoiceChannel)
 		return
 	}
 
-	go func() {
+	go func(ic *discordgo.InteractionCreate, vs *discordgo.VoiceState) {
 		playlist, err := handler.playlistGenerator.GeneratePlaylist(handler.ctx, &sources.PlaylistParams{
 			Description: description,
 			Length:      int(length),
@@ -251,42 +233,41 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 		if err != nil {
 			logger.Info("failed to generate playlist", zap.Error(err))
 			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
-				Content: "😨 Failed to generate playlist",
+				Content: MessageFailedGeneratePlaylist,
 			})
 			return
 		}
 
 		logger.Debug("generated playlist", zap.Any("songs", playlist.Playlist))
 
-		resposeMessage := strings.Builder{}
+		memberName := getMemberName(ic.Member)
+		songs := make([]*bot.Song, 0, len(playlist.Playlist))
 
 		for _, input := range playlist.Playlist {
-			songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
+			ss, err := handler.songLookuper.LookupSongs(handler.ctx, input)
 			if err != nil {
 				logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
 				continue
 			}
 
-			if len(songs) == 0 {
+			if len(ss) == 0 {
 				continue
 			}
 
-			song := songs[0]
-			if err := player.AddSong(&ic.ChannelID, &voiceState.ChannelID, song); err != nil {
-				logger.Info("failed to add song", zap.Error(err), zap.String("input", input))
-				continue
-			}
+			song := ss[0]
+			song.RequestedBy = &memberName
 
-			resposeMessage.WriteString(fmt.Sprintf("- %s (%s)\n", song.Title, song.Duration))
+			songs = append(songs, song)
+		}
+
+		if err := player.AddSong(&ic.ChannelID, &vs.ChannelID, songs...); err != nil {
+			logger.Info("failed to add songs", zap.Error(err))
 		}
 
 		FollowupMessageCreate(logger, s, ic.Interaction, &discordgo.WebhookParams{
-			Content: playlist.Intro,
-			Embeds: []*discordgo.MessageEmbed{
-				{Title: "Songs:", Description: resposeMessage.String()},
-			},
+			Embeds: []*discordgo.MessageEmbed{GeneratePlaylistAdded(playlist.Intro, songs, ic.Member)},
 		})
-	}()
+	}(ic, vs)
 
 	InteractionRespond(logger, s, ic.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -347,7 +328,35 @@ func (handler *InteractionHandler) AddSongOrPlaylist(s *discordgo.Session, ic *d
 			handler.logger.Info("failed to add song", zap.Error(err), zap.String("input", song.URL))
 			InteractionRespondMessage(handler.logger, s, ic.Interaction, "😨 Failed to add song")
 		} else {
-			InteractionRespondMessage(handler.logger, s, ic.Interaction, fmt.Sprintf("➕ Added **%s** - %s to playlist", song.Title, song.URL))
+			embed := &discordgo.MessageEmbed{
+				Author: &discordgo.MessageEmbedAuthor{
+					Name: "Added to queue",
+				},
+				Title: song.GetHumanName(),
+				URL:   song.URL,
+				Footer: &discordgo.MessageEmbedFooter{
+					Text: fmt.Sprintf("Requested by %s", *song.RequestedBy),
+				},
+				Fields: []*discordgo.MessageEmbedField{
+					{
+						Name:  "Duration",
+						Value: utils.FmtDuration(song.Duration),
+					},
+				},
+			}
+
+			if song.ThumbnailURL != nil {
+				embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+					URL: *song.ThumbnailURL,
+				}
+			}
+
+			InteractionRespond(handler.logger, s, ic.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Embeds: []*discordgo.MessageEmbed{embed},
+				},
+			})
 		}
 	}
 
@@ -369,7 +378,7 @@ func (handler *InteractionHandler) StopPlaying(s *discordgo.Session, ic *discord
 		return
 	}
 
-	InteractionRespondMessage(handler.logger, s, ic.Interaction, "⏹️ Stopped playing!")
+	InteractionRespondMessage(handler.logger, s, ic.Interaction, "⏹️  Stopped playing")
 }
 
 func (handler *InteractionHandler) SkipSong(s *discordgo.Session, ic *discordgo.InteractionCreate, acido *discordgo.ApplicationCommandInteractionDataOption) {
@@ -519,4 +528,14 @@ func (handler *InteractionHandler) getGuildPlayer(guildID GuildID) *bot.GuildPla
 	}
 
 	return player
+}
+
+func getUsersVoiceState(guild *discordgo.Guild, user *discordgo.User) *discordgo.VoiceState {
+	for _, vs := range guild.VoiceStates {
+		if vs.UserID == user.ID {
+			return vs
+		}
+	}
+
+	return nil
 }

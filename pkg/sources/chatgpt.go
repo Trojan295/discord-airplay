@@ -49,7 +49,7 @@ func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, params 
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,
-					Content: "I want you to act as a DJ. I will provide you with a description of a playlist and number of songs, and you will create it for me. You should output the list of songs, each in a new line with artist and title. Add also some nice introduction before the song list. Do not include any additional information or description, simply output: <introduction>\n<song number>. <artist> - <title>",
+					Content: "I want you to act as a DJ. I will provide you with a description of a playlist and number of songs, and you will create it for me. You should output the list of songs, each in a new line with artist and title. Add also some nice introduction before the song list, max 250 characters. Do not include any additional information or description, simply output: <introduction>\n<song number>. <artist> - <title>",
 				},
 				{
 					Role:    openai.ChatMessageRoleUser,

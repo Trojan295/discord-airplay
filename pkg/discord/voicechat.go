@@ -35,25 +35,7 @@ func (session *DiscordVoiceChatSession) SendMessage(channelID, message string) e
 
 func (session *DiscordVoiceChatSession) SendPlayMessage(channelID string, message *bot.PlayMessage) (string, error) {
 	msg, err := session.discordSession.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Embeds: []*discordgo.MessageEmbed{
-			{
-				Title: "▶️  Playing song",
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:  "Name",
-						Value: message.Song.GetHumanName(),
-					},
-					{
-						Name:  "Progress",
-						Value: fmt.Sprintf("%s / %s", fmtDuration(message.Position), fmtDuration(message.Song.Duration)),
-					},
-					{
-						Name:  "URL",
-						Value: message.Song.URL,
-					},
-				},
-			},
-		},
+		Embed: GeneratePlayingSongEmbed(message),
 	})
 	if err != nil {
 		return "", err
@@ -66,25 +48,7 @@ func (session *DiscordVoiceChatSession) EditPlayMessage(channelID, messageID str
 	_, err := session.discordSession.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		ID:      messageID,
 		Channel: channelID,
-		Embeds: []*discordgo.MessageEmbed{
-			{
-				Title: "▶️  Playing song",
-				Fields: []*discordgo.MessageEmbedField{
-					{
-						Name:  "Name",
-						Value: message.Song.GetHumanName(),
-					},
-					{
-						Name:  "Progress",
-						Value: fmt.Sprintf("%s / %s", fmtDuration(message.Position), fmtDuration(message.Song.Duration)),
-					},
-					{
-						Name:  "URL",
-						Value: message.Song.URL,
-					},
-				},
-			},
-		},
+		Embeds:  []*discordgo.MessageEmbed{GeneratePlayingSongEmbed(message)},
 	})
 	return err
 }
@@ -128,12 +92,4 @@ func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, reader io
 	}
 
 	return nil
-}
-
-func fmtDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-	return fmt.Sprintf("%02d:%02d", m, s)
 }

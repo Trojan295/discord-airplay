@@ -22,12 +22,15 @@ type Trigger struct {
 type Song struct {
 	Type string
 
-	Title    string
-	URL      string
-	Playable bool
+	Title        string
+	URL          string
+	Playable     bool
+	ThumbnailURL *string
 
 	Duration      time.Duration
 	StartPosition time.Duration
+
+	RequestedBy *string
 }
 
 func (s *Song) GetHumanName() string {
@@ -132,9 +135,11 @@ func (p *GuildPlayer) SendMessage(message string) {
 	}
 }
 
-func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, s *Song) error {
-	if err := p.state.AppendSong(s); err != nil {
-		return fmt.Errorf("while appending song: %w", err)
+func (p *GuildPlayer) AddSong(textChannelID, voiceChannelID *string, songs ...*Song) error {
+	for _, song := range songs {
+		if err := p.state.AppendSong(song); err != nil {
+			return fmt.Errorf("while appending song: %w", err)
+		}
 	}
 
 	go func() {
@@ -345,6 +350,10 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 
 		}); err != nil {
 			return fmt.Errorf("while sending audio data: %w", err)
+		}
+
+		if err := p.session.EditPlayMessage(textChannel, playMsgID, &PlayMessage{Song: song, Position: song.Duration}); err != nil {
+			logger.Error("failed to edit message", zap.Error(err))
 		}
 
 		if err := p.state.SetCurrentSong(nil); err != nil {
