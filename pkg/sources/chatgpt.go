@@ -2,30 +2,39 @@ package sources
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 	"golang.org/x/exp/slog"
 )
 
+const AssistantID = "asst_XaJbt5qXnInquWa1K6wNUYUT"
+
 type ChatGPTPlaylistGenerator struct {
-	Logger       *slog.Logger
+	Logger *slog.Logger
+
 	openAIClient *openai.Client
+	model        string
+	assistantID  string
 }
 
 func NewChatGPTPlaylistGenerator(token string) *ChatGPTPlaylistGenerator {
-	client := openai.NewClient(token)
+	config := openai.DefaultConfig(token)
+	config.AssistantVersion = "v2"
+	client := openai.NewClientWithConfig(config)
 	return &ChatGPTPlaylistGenerator{
 		Logger:       slog.Default(),
 		openAIClient: client,
+		model:        openai.GPT4o,
+		assistantID:  AssistantID,
 	}
 }
 
 type PlaylistParams struct {
-	Description string
-	Length      int
+	Description string `json:"description"`
+	Length      int    `json:"length"`
 }
 
 type PlaylistResponse struct {
@@ -42,44 +51,79 @@ func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, params 
 		params.Length = 10
 	}
 
-	resp, err := g.openAIClient.CreateChatCompletion(
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model: openai.GPT3Dot5Turbo,
-			Messages: []openai.ChatCompletionMessage{
+	messageContent, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("while marshaling playlist params: %w", err)
+	}
+
+	run, err := g.openAIClient.CreateThreadAndRun(ctx, openai.CreateThreadAndRunRequest{
+		RunRequest: openai.RunRequest{
+			Model:       g.model,
+			AssistantID: g.assistantID,
+		},
+		Thread: openai.ThreadRequest{
+			Messages: []openai.ThreadMessage{
 				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "I want you to act as a DJ. I will provide you with a description of a playlist and number of songs, and you will create it for me. You should output the list of songs, each in a new line with artist and title. Add also some nice introduction before the song list, max 250 characters. Do not include any additional information or description, simply output: <introduction>\n<song number>. <artist> - <title>",
-				},
-				{
-					Role:    openai.ChatMessageRoleUser,
-					Content: fmt.Sprintf("Create for me a playlist of %d songs of %s", params.Length, params.Description),
+					Role:    openai.ThreadMessageRoleUser,
+					Content: string(messageContent),
 				},
 			},
 		},
-	)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("while creating chat completion: %w", err)
+		return nil, fmt.Errorf("while creating thread and running: %w", err)
 	}
 
-	g.Logger.Debug("chat completion completed", "respose", resp.Choices[0].Message.Content, "prompt tokens", resp.Usage.PromptTokens, "output tokens", resp.Usage.CompletionTokens)
+	runWaitCtx, cancel := context.WithTimeout(ctx, time.Duration(15*time.Second))
+	defer cancel()
 
-	lines := strings.Split(resp.Choices[0].Message.Content, "\n")
+	runCh := make(chan *openai.Run)
+	go func(ctx context.Context) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				run, err := g.openAIClient.RetrieveRun(ctx, run.ThreadID, run.ID)
+				if err != nil {
+					time.Sleep(1 * time.Second)
+					continue
+				}
 
-	regex := regexp.MustCompile(`^\d+\.(.+)$`)
+				if run.Status == openai.RunStatusCompleted {
+					runCh <- &run
+					return
+				}
 
-	playlist := make([]string, 0)
-	for _, line := range lines {
-		matches := regex.FindStringSubmatch(line)
-		if matches == nil {
-			continue
+				time.Sleep(1 * time.Second)
+			}
+		}
+	}(runWaitCtx)
+
+	select {
+	case <-runWaitCtx.Done():
+		return nil, fmt.Errorf("timeout while waiting for run to complete")
+
+	case run := <-runCh:
+		messageList, err := g.openAIClient.ListMessage(ctx, run.ThreadID, nil, nil, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("while listing messages: %w", err)
 		}
 
-		playlist = append(playlist, strings.TrimSpace(matches[1]))
-	}
+		if len(messageList.Messages) != 2 {
+			return nil, fmt.Errorf("unexpected number of messages: %d", len(messageList.Messages))
+		}
 
-	return &PlaylistResponse{
-		Intro:    lines[0],
-		Playlist: playlist,
-	}, nil
+		if len(messageList.Messages[0].Content) != 1 {
+			return nil, fmt.Errorf("unexpected number of message content: %d", len(messageList.Messages[0].Content))
+		}
+
+		response := &PlaylistResponse{}
+		responseText := messageList.Messages[0].Content[0].Text.Value
+		if err := json.Unmarshal([]byte(responseText), response); err != nil {
+			return nil, fmt.Errorf("while unmarshaling response: %w", err)
+		}
+
+		return response, nil
+	}
 }

@@ -1,0 +1,5 @@
+services:
+  airplay:
+    build: .
+    env_file:
+      - .envrc

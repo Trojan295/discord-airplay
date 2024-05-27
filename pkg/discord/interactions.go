@@ -177,8 +177,8 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 						discordgo.SelectMenu{
 							CustomID: "add_song_playlist",
 							Options: []discordgo.SelectMenuOption{
-								{Label: "Add song", Value: "song", Emoji: discordgo.ComponentEmoji{Name: "🎵"}},
-								{Label: "Add whole playlist", Value: "playlist", Emoji: discordgo.ComponentEmoji{Name: "🎶"}},
+								{Label: "Add song", Value: "song", Emoji: &discordgo.ComponentEmoji{Name: "🎵"}},
+								{Label: "Add whole playlist", Value: "playlist", Emoji: &discordgo.ComponentEmoji{Name: "🎶"}},
 							},
 						},
 					},

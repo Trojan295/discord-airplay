@@ -45,10 +45,12 @@ func (session *DiscordVoiceChatSession) SendPlayMessage(channelID string, messag
 }
 
 func (session *DiscordVoiceChatSession) EditPlayMessage(channelID, messageID string, message *bot.PlayMessage) error {
+	embeds := []*discordgo.MessageEmbed{GeneratePlayingSongEmbed(message)}
+
 	_, err := session.discordSession.ChannelMessageEditComplex(&discordgo.MessageEdit{
 		ID:      messageID,
 		Channel: channelID,
-		Embeds:  []*discordgo.MessageEmbed{GeneratePlayingSongEmbed(message)},
+		Embeds:  &embeds,
 	})
 	return err
 }
