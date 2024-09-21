@@ -1,4 +1,4 @@
-FROM golang:1.19 AS builder
+FROM golang:1.23 AS builder
 
 RUN apt-get update \
   && apt-get install -y build-essential libopus-dev libopusfile-dev \
@@ -13,9 +13,9 @@ COPY . .
 
 RUN CGO_ENABLED=1 GOARCH=amd64 go build -o /bin/airplay cmd/airplay/airplay.go
 
-FROM ubuntu
+FROM ubuntu:24.10
 
-ARG YT_DLP_VERSION="2023.10.13"
+ARG YT_DLP_VERSION="2024.08.06"
 
 RUN apt-get update \
   && apt-get install -y ffmpeg wget libopusfile0 \
