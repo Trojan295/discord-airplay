@@ -1,13 +1,13 @@
 package sources
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -15,10 +15,16 @@ import (
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
 	"golang.org/x/exp/slog"
+	"gopkg.in/hraban/opus.v2"
 )
 
 const (
-	downloadBuffer = 100 * 1024 // 100 KiB
+	sampleRate = 48000
+	channels   = 2
+
+	frameLength = 20 * time.Millisecond
+	pcmBufSize  = sampleRate * channels / (time.Second / frameLength)
+	opusBufSize = 1024
 )
 
 type YoutubeFetcher struct {
@@ -91,11 +97,12 @@ func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]*bot.
 	return songs, nil
 }
 
-func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Reader, error) {
+func (s *YoutubeFetcher) GetAudio(ctx context.Context, song *bot.Song) (<-chan []byte, error) {
+	opusCh := make(chan []byte, 500)
+
 	reader, writer := io.Pipe()
 
-	go func(w io.WriteCloser) {
-		defer w.Close()
+	go func() {
 
 		ytArgs := []string{"-U", "-x", "-o", "-", "--force-overwrites", "--http-chunk-size", "100K", "'" + song.URL + "'"}
 
@@ -106,23 +113,32 @@ func (s *YoutubeFetcher) GetDCAData(ctx context.Context, song *bot.Song) (io.Rea
 		ffmpegArgs = append(ffmpegArgs, "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
 
 		downloadCmd := exec.CommandContext(ctx,
-			"sh", "-c", fmt.Sprintf("yt-dlp %s | ffmpeg %s | dca",
+			"sh", "-c", fmt.Sprintf("yt-dlp %s | ffmpeg %s",
 				strings.Join(ytArgs, " "),
 				strings.Join(ffmpegArgs, " ")))
 
-		bw := bufio.NewWriterSize(writer, downloadBuffer)
-		downloadCmd.Stdout = bw
+		stderrBuf := &bytes.Buffer{}
+
+		downloadCmd.Stdout = writer
+		downloadCmd.Stderr = stderrBuf
 
 		if err := downloadCmd.Run(); err != nil {
-			log.Printf("while executing get DCA data pipe: %v", err)
+			s.Logger.Error("while executing get data pipe", "error", err, "stderr", stderrBuf.String())
 		}
 
-		if err := bw.Flush(); err != nil {
-			log.Printf("while flushing DCA data pipe: %v", err)
+		if err := writer.Close(); err != nil {
+			s.Logger.Error("while flushing data pipe", "error", err)
 		}
-	}(writer)
+	}()
 
-	return reader, nil
+	go func() {
+		defer close(opusCh)
+		if err := encodeOpus(ctx, reader, opusCh); err != nil {
+			s.Logger.Error("while encoding to Opus", "error", err)
+		}
+	}()
+
+	return opusCh, nil
 }
 
 type thumnail struct {
@@ -151,4 +167,35 @@ func getThumbnail(thumnailsStr string) (*thumnail, error) {
 	}
 
 	return tn, nil
+}
+
+func encodeOpus(ctx context.Context, dca io.Reader, opusChan chan<- []byte) error {
+	enc, err := opus.NewEncoder(sampleRate, channels, opus.AppAudio)
+	if err != nil {
+		return fmt.Errorf("while creating opus encoder: %w", err)
+	}
+
+	for {
+		pcmBuf := make([]int16, pcmBufSize)
+		if err := binary.Read(dca, binary.LittleEndian, pcmBuf); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil
+			}
+
+			return fmt.Errorf("while reading PCM: %w", err)
+		}
+
+		opusBuf := make([]byte, opusBufSize)
+
+		size, err := enc.Encode(pcmBuf, opusBuf)
+		if err != nil {
+			return fmt.Errorf("while encoding: %w", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case opusChan <- opusBuf[0:size]:
+		}
+	}
 }

@@ -92,20 +92,12 @@ func main() {
 	}
 	defer dg.Close()
 
-	slashCommands := commandHandler.GetSlashCommands()
-	registeredCommands, err := dg.ApplicationCommandBulkOverwrite(dg.State.User.ID, cfg.GuildID, slashCommands)
-	if err != nil {
-		logger.Fatal("failed to bulk overwriter command", zap.Error(err))
-	}
-
-	if cfg.GuildID != "" {
-		defer func() {
-			for _, cmd := range registeredCommands {
-				if err := dg.ApplicationCommandDelete(dg.State.User.ID, cfg.GuildID, cmd.ID); err != nil {
-					logger.Error("failed to delete command", zap.String("command", cmd.Name), zap.Error(err))
-				}
-			}
-		}()
+	if !cfg.PerGuildCommands {
+		slashCommands := commandHandler.GetSlashCommands()
+		_, err := dg.ApplicationCommandBulkOverwrite(dg.State.Application.ID, "", slashCommands)
+		if err != nil {
+			logger.Fatal("failed to bulk overwriter command", zap.Error(err))
+		}
 	}
 
 	logger.Info("airplay is now running.  Press CTRL-C to exit.")

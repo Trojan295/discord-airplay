@@ -105,7 +105,7 @@ func (g *ChatGPTPlaylistGenerator) GeneratePlaylist(ctx context.Context, params 
 		return nil, fmt.Errorf("timeout while waiting for run to complete")
 
 	case run := <-runCh:
-		messageList, err := g.openAIClient.ListMessage(ctx, run.ThreadID, nil, nil, nil, nil)
+		messageList, err := g.openAIClient.ListMessage(ctx, run.ThreadID, nil, nil, nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("while listing messages: %w", err)
 		}

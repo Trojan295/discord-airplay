@@ -1,5 +1,7 @@
+AIR_BIN := go run github.com/air-verse/air@latest
+
 run-dev:
-	go run ./cmd/airplay
+	$(AIR_BIN)
 .PHONY: run-dev
 
 build-docker:

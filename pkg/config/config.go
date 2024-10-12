@@ -11,8 +11,9 @@ import (
 type Config struct {
 	DiscordToken  string `required:"true"`
 	OpenAIToken   string
-	GuildID       string
 	CommandPrefix string `default:"air"`
+
+	PerGuildCommands bool `default:"false"`
 
 	Store StoreConfig
 }

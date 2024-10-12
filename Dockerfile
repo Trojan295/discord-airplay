@@ -1,21 +1,18 @@
 FROM golang:1.23 AS builder
 
-RUN apt-get update \
-  && apt-get install -y build-essential libopus-dev libopusfile-dev \
-  && go install github.com/bwmarrin/dca/cmd/dca@latest
-
 WORKDIR /src/
+RUN apt-get update && apt-get install -y libopus-dev libopusfile-dev
 
 COPY go.mod go.sum .
 RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 GOARCH=amd64 go build -o /bin/airplay cmd/airplay/airplay.go
+RUN CGO_ENABLED=1 GOARCH=amd64 go build -ldflags '-w -s' -o /bin/airplay cmd/airplay/airplay.go
 
 FROM ubuntu:24.10
 
-ARG YT_DLP_VERSION="2024.08.06"
+ARG YT_DLP_VERSION="2024.10.07"
 
 RUN apt-get update \
   && apt-get install -y ffmpeg wget libopusfile0 \
@@ -23,6 +20,5 @@ RUN apt-get update \
   && chmod +x /usr/local/bin/yt-dlp
 
 COPY --from=builder /bin/airplay /bin/airplay
-COPY --from=builder /go/bin/dca /usr/local/bin/dca
 
 CMD ["/bin/airplay"]

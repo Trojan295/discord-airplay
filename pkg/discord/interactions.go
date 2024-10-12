@@ -76,11 +76,28 @@ func (handler *InteractionHandler) GuildCreate(s *discordgo.Session, event *disc
 		return
 	}
 
+	if handler.cfg.PerGuildCommands {
+		commandHandler := NewSlashCommandRouter(handler.cfg.CommandPrefix).
+			PlayHandler(handler.PlaySong).
+			SkipHandler(handler.SkipSong).
+			StopHandler(handler.StopPlaying).
+			ListHandler(handler.ListPlaylist).
+			RemoveHandler(handler.RemoveSong).
+			PlayingNowHandler(handler.GetPlayingSong).
+			DJHandler(handler.CreatePlaylist).
+			AddSongOrPlaylistHandler(handler.AddSongOrPlaylist)
+
+		slashCommands := commandHandler.GetSlashCommands()
+		_, err := s.ApplicationCommandBulkOverwrite(s.State.Application.ID, event.Guild.ID, slashCommands)
+		if err != nil {
+			handler.logger.Error("failed to bulk overwriter command", zap.Error(err))
+		}
+	}
+
 	player := handler.setupGuildPlayer(GuildID(event.Guild.ID))
 	handler.guildPlayers[GuildID(event.Guild.ID)] = player
 
 	handler.logger.Info("connected to guild", zap.String("guildID", event.Guild.ID))
-
 	go func() {
 		if err := player.Run(handler.ctx); err != nil {
 			handler.logger.Error("error occured, when player was running", zap.Error(err))
@@ -516,7 +533,7 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 
 	playlistStore := config.GetPlaylistStore(handler.cfg, string(guildID))
 
-	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore, sources.GetDCAData).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
+	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore, sources.GetAudio).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
 }
 

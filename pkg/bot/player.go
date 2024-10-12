@@ -1,11 +1,9 @@
 package bot
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"go.uber.org/zap"
@@ -53,10 +51,10 @@ type VoiceChatSession interface {
 	EditPlayMessage(channelID, messageID string, message *PlayMessage) error
 	JoinVoiceChannel(channelID string) error
 	LeaveVoiceChannel() error
-	SendAudio(ctx context.Context, r io.Reader, positionCallback func(time.Duration)) error
+	SendAudio(ctx context.Context, opusCh <-chan []byte, positionCallback func(time.Duration)) error
 }
 
-type DCADataGetter func(ctx context.Context, song *Song) (io.Reader, error)
+type SongAudioGetter func(ctx context.Context, song *Song) (<-chan []byte, error)
 
 type PlayedSong struct {
 	Song
@@ -91,8 +89,7 @@ type GuildPlayer struct {
 	triggerCh     chan Trigger
 	songCtxCancel context.CancelFunc
 
-	dCADataGetter   DCADataGetter
-	audioBufferSize int
+	songAudioGetter SongAudioGetter
 
 	logger *zap.Logger
 }
@@ -101,15 +98,14 @@ var (
 	ErrRemoveInvalidPosition = errors.New("invalid position")
 )
 
-func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, state GuildPlayerState, dCADataGetter DCADataGetter) *GuildPlayer {
+func NewGuildPlayer(ctx context.Context, session VoiceChatSession, guildID string, state GuildPlayerState, dCADataGetter SongAudioGetter) *GuildPlayer {
 	return &GuildPlayer{
 		ctx:             ctx,
 		state:           state,
 		session:         session,
 		triggerCh:       make(chan Trigger),
 		logger:          zap.NewNop(),
-		dCADataGetter:   dCADataGetter,
-		audioBufferSize: 1024 * 1024, // 1 MiB
+		songAudioGetter: dCADataGetter,
 	}
 }
 
@@ -333,14 +329,13 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while sending message with song name: %w", err)
 		}
 
-		dcaData, err := p.dCADataGetter(songCtx, song)
+		opusCh, err := p.songAudioGetter(songCtx, song)
 		if err != nil {
 			return fmt.Errorf("while getting DCA data from song %v: %w", song, err)
 		}
 
-		audioReader := bufio.NewReaderSize(dcaData, p.audioBufferSize)
 		logger.Debug("sending audio stream")
-		if err := p.session.SendAudio(songCtx, audioReader, func(d time.Duration) {
+		if err := p.session.SendAudio(songCtx, opusCh, func(d time.Duration) {
 			if err := p.state.SetCurrentSong(&PlayedSong{Song: *song, Position: d}); err != nil {
 				logger.Error("failed to set current song position", zap.Error(err))
 			}

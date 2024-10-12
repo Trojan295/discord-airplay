@@ -3,11 +3,10 @@ package discord
 import (
 	"context"
 	"fmt"
-	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/Trojan295/discord-airplay/pkg/bot"
-	"github.com/Trojan295/discord-airplay/pkg/codec"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -80,13 +79,30 @@ func (session *DiscordVoiceChatSession) LeaveVoiceChannel() error {
 	return nil
 }
 
-func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, reader io.Reader, positionCallback func(time.Duration)) error {
+func (session *DiscordVoiceChatSession) SendAudio(ctx context.Context, opusCh <-chan []byte, positionCallback func(time.Duration)) error {
 	if err := session.voiceConnection.Speaking(true); err != nil {
 		return fmt.Errorf("while starting to speak: %w", err)
 	}
 
-	if err := codec.StreamDCAData(ctx, reader, session.voiceConnection.OpusSend, positionCallback); err != nil {
-		return fmt.Errorf("while streaming DCA data: %w", err)
+	frameCounter := atomic.Int32{}
+
+outer:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg, ok := <-opusCh:
+			if !ok {
+				break outer
+			}
+			session.voiceConnection.OpusSend <- msg
+
+			go func() {
+				if frames := frameCounter.Add(1); frames%50 == 0 {
+					positionCallback(time.Duration(frames) * 20 * time.Millisecond)
+				}
+			}()
+		}
 	}
 
 	if err := session.voiceConnection.Speaking(false); err != nil {
