@@ -29,24 +29,44 @@ const (
 
 type YoutubeFetcher struct {
 	Logger *slog.Logger
+
+	proxy *string
 }
 
-func NewYoutubeFetcher() *YoutubeFetcher {
-	return &YoutubeFetcher{
+type Option func(f *YoutubeFetcher)
+
+func WithProxy(proxy string) Option {
+	return func(f *YoutubeFetcher) {
+		f.proxy = &proxy
+	}
+}
+
+func NewYoutubeFetcher(opts ...Option) *YoutubeFetcher {
+	f := &YoutubeFetcher{
 		Logger: slog.Default(),
 	}
+
+	for _, opt := range opts {
+		opt(f)
+	}
+
+	return f
 }
 
 func (s *YoutubeFetcher) LookupSongs(ctx context.Context, input string) ([]*bot.Song, error) {
 	ytDlpPrintColumns := []string{"title", "original_url", "is_live", "duration", "thumbnail", "thumbnails"}
 	printColumns := strings.Join(ytDlpPrintColumns, ",")
 
-	args := []string{"--print", printColumns, "--flat-playlist", "-U"}
+	args := []string{"--print", printColumns, "-U"}
 
 	if strings.HasPrefix(input, "https://") {
 		args = append(args, input)
 	} else {
-		args = append(args, fmt.Sprintf("ytsearch:%s", input))
+		args = append(args, fmt.Sprintf("scsearch:%s", input))
+	}
+
+	if s.proxy != nil {
+		args = append(args, "--proxy", *s.proxy)
 	}
 
 	ytCmd := exec.CommandContext(ctx, "yt-dlp", args...)
@@ -103,8 +123,11 @@ func (s *YoutubeFetcher) GetAudio(ctx context.Context, song *bot.Song) (<-chan [
 	reader, writer := io.Pipe()
 
 	go func() {
-
 		ytArgs := []string{"-U", "-x", "-o", "-", "--force-overwrites", "--http-chunk-size", "100K", "'" + song.URL + "'"}
+
+		if s.proxy != nil {
+			ytArgs = append(ytArgs, "--proxy", *s.proxy)
+		}
 
 		ffmpegArgs := []string{"-i", "pipe:0"}
 		if song.StartPosition > 0 {

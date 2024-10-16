@@ -16,8 +16,9 @@ import (
 
 type GuildID string
 
-type SongLookuper interface {
+type SongProvider interface {
 	LookupSongs(ctx context.Context, input string) ([]*bot.Song, error)
+	GetAudio(ctx context.Context, song *bot.Song) (<-chan []byte, error)
 }
 
 type PlaylistGenerator interface {
@@ -37,7 +38,7 @@ type InteractionHandler struct {
 	guildPlayers map[GuildID]*bot.GuildPlayer
 
 	playlistGenerator PlaylistGenerator
-	songLookuper      SongLookuper
+	songProvider      SongProvider
 	storage           InteractionStorage
 
 	cfg *config.Config // TODO: replace with a playlist store, which supports multiple guilds
@@ -45,13 +46,13 @@ type InteractionHandler struct {
 	logger *zap.Logger
 }
 
-func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongLookuper, playlistGenerator PlaylistGenerator, storage InteractionStorage, cfg *config.Config) *InteractionHandler {
+func NewInteractionHandler(ctx context.Context, discordToken string, songLookuper SongProvider, playlistGenerator PlaylistGenerator, storage InteractionStorage, cfg *config.Config) *InteractionHandler {
 	handler := &InteractionHandler{
 		ctx:               ctx,
 		discordToken:      discordToken,
 		guildPlayers:      make(map[GuildID]*bot.GuildPlayer),
 		playlistGenerator: playlistGenerator,
-		songLookuper:      songLookuper,
+		songProvider:      songLookuper,
 		storage:           storage,
 		cfg:               cfg,
 		logger:            zap.NewNop(),
@@ -146,7 +147,7 @@ func (handler *InteractionHandler) PlaySong(s *discordgo.Session, ic *discordgo.
 	})
 
 	go func(ic *discordgo.InteractionCreate, vs *discordgo.VoiceState) {
-		songs, err := handler.songLookuper.LookupSongs(handler.ctx, input)
+		songs, err := handler.songProvider.LookupSongs(handler.ctx, input)
 		if err != nil {
 			logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
 			FollowupMessageCreate(handler.logger, s, ic.Interaction, &discordgo.WebhookParams{
@@ -261,7 +262,7 @@ func (handler *InteractionHandler) CreatePlaylist(s *discordgo.Session, ic *disc
 		songs := make([]*bot.Song, 0, len(playlist.Playlist))
 
 		for _, input := range playlist.Playlist {
-			ss, err := handler.songLookuper.LookupSongs(handler.ctx, input)
+			ss, err := handler.songProvider.LookupSongs(handler.ctx, input)
 			if err != nil {
 				logger.Info("failed to lookup song metadata", zap.Error(err), zap.String("input", input))
 				continue
@@ -533,7 +534,7 @@ func (handler *InteractionHandler) setupGuildPlayer(guildID GuildID) *bot.GuildP
 
 	playlistStore := config.GetPlaylistStore(handler.cfg, string(guildID))
 
-	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore, sources.GetAudio).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
+	player := bot.NewGuildPlayer(handler.ctx, voiceChat, string(guildID), playlistStore, handler.songProvider.GetAudio).WithLogger(handler.logger.With(zap.String("guildID", string(guildID))))
 	return player
 }
 

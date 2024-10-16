@@ -45,8 +45,16 @@ func main() {
 		logger.Fatal("failed to load envconfig", zap.Error(err))
 	}
 
+	logger.With(zap.String("store_type", cfg.Store.Type), zap.Any("yt-dlp", cfg.YtDlp)).Info("starting airplay")
+
 	storage = discord.NewInMemoryStorage()
-	youtubeFetcher = sources.NewYoutubeFetcher()
+
+	youtubeFetcherOpts := []sources.Option{}
+	if cfg.YtDlp.Proxy != "" {
+		youtubeFetcherOpts = append(youtubeFetcherOpts, sources.WithProxy(cfg.YtDlp.Proxy))
+	}
+	youtubeFetcher = sources.NewYoutubeFetcher(youtubeFetcherOpts...)
+
 	playlistGenerator := sources.NewChatGPTPlaylistGenerator(cfg.OpenAIToken)
 
 	handler := discord.NewInteractionHandler(ctx, cfg.DiscordToken, youtubeFetcher, playlistGenerator, storage, cfg).WithLogger(logger.Named("interactionHandler"))
@@ -65,7 +73,6 @@ func main() {
 		logger.Fatal("failed to create Discord session", zap.Error(err))
 		return
 	}
-
 	dg.AddHandler(handler.Ready)
 	dg.AddHandler(handler.GuildCreate)
 	dg.AddHandler(handler.GuildDelete)

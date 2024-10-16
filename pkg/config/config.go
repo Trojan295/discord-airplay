@@ -16,11 +16,17 @@ type Config struct {
 	PerGuildCommands bool `default:"false"`
 
 	Store StoreConfig
+
+	YtDlp YtDlpConfig
 }
 
 type StoreConfig struct {
 	Type string `default:"memory"`
 	File FileStoreConfig
+}
+
+type YtDlpConfig struct {
+	Proxy string `default:""`
 }
 
 type FileStoreConfig struct {

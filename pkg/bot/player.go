@@ -194,20 +194,6 @@ func (p *GuildPlayer) GetPlayedSong() (*PlayedSong, error) {
 	return p.state.GetCurrentSong()
 }
 
-func (p *GuildPlayer) JoinVoiceChannel(channelID, textChannelID string) {
-	p.triggerCh <- Trigger{
-		Command:        "join",
-		VoiceChannelID: &channelID,
-		TextChannelID:  &textChannelID,
-	}
-}
-
-func (p *GuildPlayer) LeaveVoiceChannel() {
-	p.triggerCh <- Trigger{
-		Command: "leave",
-	}
-}
-
 func (p *GuildPlayer) Run(ctx context.Context) error {
 	currentSong, err := p.state.GetCurrentSong()
 	if err != nil {
@@ -313,14 +299,15 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while poping first song: %w", err)
 		}
 
+		logger := p.logger.With(zap.String("title", song.Title), zap.String("url", song.URL))
+		logger.Debug("picking next song")
+
 		if err := p.state.SetCurrentSong(&PlayedSong{Song: *song}); err != nil {
 			return fmt.Errorf("while setting current song: %w", err)
 		}
 
 		var songCtx context.Context
 		songCtx, p.songCtxCancel = context.WithCancel(ctx)
-
-		logger := p.logger.With(zap.String("title", song.Title), zap.String("url", song.URL))
 
 		playMsgID, err := p.session.SendPlayMessage(textChannel, &PlayMessage{
 			Song: song,
@@ -334,7 +321,7 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while getting DCA data from song %v: %w", song, err)
 		}
 
-		logger.Debug("sending audio stream")
+		logger.Debug("sending audio")
 		if err := p.session.SendAudio(songCtx, opusCh, func(d time.Duration) {
 			if err := p.state.SetCurrentSong(&PlayedSong{Song: *song, Position: d}); err != nil {
 				logger.Error("failed to set current song position", zap.Error(err))
@@ -347,6 +334,8 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 			return fmt.Errorf("while sending audio data: %w", err)
 		}
 
+		logger.Debug("finished sending audio")
+
 		if err := p.session.EditPlayMessage(textChannel, playMsgID, &PlayMessage{Song: song, Position: song.Duration}); err != nil {
 			logger.Error("failed to edit message", zap.Error(err))
 		}
@@ -354,7 +343,6 @@ func (p *GuildPlayer) playPlaylist(ctx context.Context) error {
 		if err := p.state.SetCurrentSong(nil); err != nil {
 			return fmt.Errorf("while setting current song: %w", err)
 		}
-		logger.Debug("stopped playing")
 
 		time.Sleep(250 * time.Millisecond)
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	MessageUserNotInVoiceChannel  = "🤷🏽  You are not in a voice channel. Join a voice channel to play a song."
+	MessageUserNotInVoiceChannel  = "🤷 You are not in a voice channel. Join a voice channel to play a song."
 	MessageTooLargePlaylist       = "😨 You cannot request a playlist longer than 20 songs."
 	MessageFailedGeneratePlaylist = "😨 Failed to generate playlist."
 )
@@ -52,7 +52,10 @@ func GenerateFailedToFindSong(input string, member *discordgo.Member) *discordgo
 }
 
 func GeneratePlayingSongEmbed(message *bot.PlayMessage) *discordgo.MessageEmbed {
-	progressBar := generateProgressBar(float64(message.Position)/float64(message.Song.Duration), 20)
+	progressBar := ""
+	if message.Song.Duration > 0 {
+		progressBar = generateProgressBar(float64(message.Position)/float64(message.Song.Duration), 20)
+	}
 
 	embed := &discordgo.MessageEmbed{
 		Title:       fmt.Sprintf("▶️  %s", message.Song.GetHumanName()),
@@ -110,6 +113,10 @@ func generateAddingSongEmbed(title, description string, requestor *discordgo.Mem
 }
 
 func generateProgressBar(progress float64, length int) string {
+	if length == 0 {
+		return ""
+	}
+
 	played := int(progress * float64(length))
 
 	progressBar := ""
